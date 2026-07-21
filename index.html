@@ -82,19 +82,29 @@
     background: rgba(255,255,255,0.85); border-radius:6px; padding:2px 8px;
   }
   .locbanner{
-    position:absolute; top:-40px; left:50%; transform: translateX(-50%);
+    /* Was positioned with a hardcoded top:-40px "hidden" offset, which assumed
+       a fixed height — once the text ran long (e.g. "Yau Ma Tei 油麻地 · JADE
+       MARKET") or the banner got bigger, it didn't fully clear the .stage's
+       overflow:hidden bounds and visibly got cut off. Fixed by hiding/showing
+       with transform: translateY instead, which fully clears regardless of
+       the banner's actual rendered height, plus a max-width + wrapping so
+       long location names can't overflow the stage horizontally either. */
+    position:absolute; top:0; left:50%;
+    max-width: 82%;
+    transform: translate(-50%, -120%);
     background: var(--navy); color: var(--white);
-    padding: 6px 18px; border-radius: 0 0 10px 10px;
-    font-family:'Baloo 2', sans-serif; font-weight:700; font-size:14px;
-    letter-spacing:0.5px; text-align:center; white-space:nowrap;
-    transition: top 0.5s cubic-bezier(.2,.9,.3,1.3);
-    box-shadow: 0 4px 10px rgba(0,0,0,0.25);
+    padding: 12px 26px; border-radius: 0 0 14px 14px;
+    font-family:'Baloo 2', sans-serif; font-weight:700; font-size:22px;
+    letter-spacing:0.5px; text-align:center; white-space:normal;
+    transition: transform 0.55s cubic-bezier(.2,.9,.3,1.3), opacity 0.4s ease;
+    opacity: 0;
+    box-shadow: 0 6px 14px rgba(0,0,0,0.3);
   }
   .locbanner .sub{
-    display:block; font-size:10px; font-weight:400; color: var(--tea-light);
-    letter-spacing:1px; margin-top:1px;
+    display:block; font-size:13px; font-weight:400; color: var(--tea-light);
+    letter-spacing:1px; margin-top:3px;
   }
-  .locbanner.show{ top:0; }
+  .locbanner.show{ transform: translate(-50%, 0); opacity: 1; }
   .overlay{
     position:absolute; inset:0;
     background: rgba(250,250,248,0.96);
@@ -330,8 +340,12 @@
 
   let score = 0, bestScore = loadBestScore();
   let levelIndex = 0;
-  let speed = 6;
-  const BASE_SPEED = 6, SPEED_PER_LEVEL = 1.15;
+  // Nudged down 2026-07-21 (same session as the delta-time fix and the Mong Kok
+  // rework) per feedback that the base pace didn't leave room to actually look
+  // at the backdrops — was BASE_SPEED 6 / SPEED_PER_LEVEL 1.15. Still escalates
+  // per level, just a bit gentler; revisit again after more playtesting.
+  let speed = 5;
+  const BASE_SPEED = 5, SPEED_PER_LEVEL = 1.12;
   let groundY = LOGICAL_H - 90;
 
   const player = {
@@ -352,12 +366,22 @@
   let shakeFrames = 0, shakeMag = 0;
   let frame = 0;
 
+  // Level-to-level background crossfade (see drawBackground/drawSceneLayer).
+  // prevLevelIndex holds the location being faded OUT of; null means no
+  // transition is in progress. transitionT counts up in dt units against
+  // LEVEL_TRANSITION_FRAMES (a "frame" here means the same 60fps-reference
+  // unit as everywhere else post the delta-time fix, so the crossfade takes
+  // the same real-world time regardless of hardware).
+  let prevLevelIndex = null, transitionT = 0;
+  const LEVEL_TRANSITION_FRAMES = 40; // ~0.67s at the 60fps reference rate
+
   function resetGame(){
     score = 0; levelIndex = 0; speed = BASE_SPEED;
     obstacles = []; collectibles = []; particles = []; popups = [];
     player.y = groundY - player.h; player.vy = 0; player.jumping = false;
     player.jumpPunch = 0; player.landPunch = 0;
     jumpBufferTimer = 0; holdingJump = false; shakeFrames = 0;
+    prevLevelIndex = null; transitionT = 0;
     spawnTimer = 0; nextSpawnAt = 60; frame = 0;
     updateHud();
     showLocationBanner(true);
@@ -375,7 +399,9 @@
     const banner = document.getElementById('locBanner');
     banner.classList.add('show');
     clearTimeout(showLocationBanner._t);
-    showLocationBanner._t = setTimeout(()=> banner.classList.remove('show'), 2200);
+    // Held a bit longer than before (2200ms) now that the banner text is
+    // noticeably bigger — gives players enough time to actually read it.
+    showLocationBanner._t = setTimeout(()=> banner.classList.remove('show'), 2700);
   }
 
   // ---------- Input ----------
@@ -458,7 +484,11 @@
   }
   function spawnCollectible(){
     const t = Math.random() < 0.45 ? 'lemon' : 'cup';
-    const w = 62, h = 72; // 2x the previous size (31x36) per playtest feedback — now larger than the player itself
+    // Sized up again 2026-07-21 (62x72 → 90x104, ~45% larger) per tester
+    // feedback that bottles were still too small to clearly recognize which
+    // Old Kennedy product was collected — the game's purpose is as much about
+    // familiarizing players with the real products as it is the runner mechanic.
+    const w = 90, h = 104;
     const hover = 55 + Math.random()*70;
     collectibles.push({ type:t, x: LOGICAL_W + 20, y: groundY - h - hover, w, h, collected:false });
   }
@@ -501,9 +531,15 @@
     score += speed * 0.045 * dt;
     const targetLevel = Math.min(LOCATIONS.length-1, Math.floor(score / LEVEL_DISTANCE));
     if(targetLevel !== levelIndex){
+      prevLevelIndex = levelIndex; // fade out of the level we're leaving
+      transitionT = 0;
       levelIndex = targetLevel;
       speed = BASE_SPEED * Math.pow(SPEED_PER_LEVEL, levelIndex);
       showLocationBanner();
+    }
+    if(prevLevelIndex !== null){
+      transitionT += dt;
+      if(transitionT >= LEVEL_TRANSITION_FRAMES) prevLevelIndex = null;
     }
 
     // spawn
@@ -566,9 +602,11 @@
   }
 
   // ---------- Draw ----------
-  function drawBackground(){
-    const loc = LOCATIONS[levelIndex];
-
+  // Draws one location's full background (sky, stars/moon or clouds, its scene,
+  // and the ground) — pulled out of drawBackground() so a level transition can
+  // call it twice in one frame (old location, then new location faded in on
+  // top) for a crossfade instead of a hard instant cut.
+  function drawSceneLayer(loc){
     if(SPRITES.bg[loc.key]){
       ctx.drawImage(SPRITES.bg[loc.key], 0, 0, LOGICAL_W, LOGICAL_H);
       return;
@@ -604,11 +642,40 @@
     ctx.fillRect(0, groundY, LOGICAL_W, 3);
   }
 
-  function parallaxOffset(mult){ return (frame*mult) % 200; }
+  function drawBackground(){
+    const loc = LOCATIONS[levelIndex];
+
+    // Crossfade into a new level's background instead of an instant hard cut.
+    // Skipped for photo-backed locations (none currently) to keep this simple.
+    if(prevLevelIndex !== null && transitionT < LEVEL_TRANSITION_FRAMES && !SPRITES.bg[loc.key]){
+      drawSceneLayer(LOCATIONS[prevLevelIndex]);
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, Math.min(1, transitionT / LEVEL_TRANSITION_FRAMES));
+      drawSceneLayer(loc);
+      ctx.restore();
+      return;
+    }
+
+    drawSceneLayer(loc);
+  }
+
+  // period MUST equal (or evenly divide) the tile spacing used alongside it —
+  // that's what makes the scroll wrap seamlessly instead of popping. Fixed
+  // 2026-07-21: every call site used to share one hardcoded 200px period
+  // regardless of each layer's actual tile width, so almost every layer's
+  // wraparound didn't line up with its own repeating pattern and visibly
+  // jumped once per cycle. Singular (non-repeating) landmarks — the Markham
+  // clock tower/maple pole, the Temple Street gate — intentionally do NOT use
+  // this at all; see their own comments below.
+  function parallaxOffset(mult, period){ return (frame*mult) % period; }
 
   // Drifting clouds for daytime backdrops (Markham, Sham Shui Po, Yau Ma Tei)
   function drawClouds(){
-    const off = parallaxOffset(0.12);
+    // period matches the outer (LOGICAL_W+240) wrap below, not the 220 spacing
+    // between individual clouds — that's deliberate, it spreads 4 clouds over
+    // a wider virtual band so they don't repeat as obviously. What matters for
+    // the no-glitch fix is that off's own period exactly equals that band.
+    const off = parallaxOffset(0.12, LOGICAL_W+240);
     ctx.fillStyle = 'rgba(255,255,255,0.55)';
     for(let i=0;i<4;i++){
       const cx = ((i*220 - off) % (LOGICAL_W+240)) - 120;
@@ -634,7 +701,7 @@
   // Markham: bright suburban plaza — low glass-front units, awnings, a clock-tower
   // feature and a small maple leaf marker to read as "home base, Canada."
   function sceneMarkham(loc){
-    const off = parallaxOffset(0.5);
+    const off = parallaxOffset(0.5, 140); // matches the 140px building spacing below
     ctx.fillStyle = '#EAE4D6';
     ctx.fillRect(0, groundY-58, LOGICAL_W, 58);
     for(let i=-1;i<7;i++){
@@ -645,8 +712,14 @@
       ctx.fillStyle = i%2===0 ? '#7A9BAE' : '#B25A2E';
       ctx.fillRect(bx, groundY-58, 120, 8);
     }
-    // clock tower feature, roughly centered
-    const towerX = 340 - off*0.4;
+    // Clock tower + maple pole are singular (one instance, not a repeating
+    // tile), so unlike the buildings above they deliberately do NOT use a
+    // wrapping parallaxOffset — a modulo'd position only looks seamless for
+    // something that repeats. Instead they drift continuously off frame*mult
+    // with no wrap at all, so they cross the screen once per level and simply
+    // scroll off for good, instead of snapping back into view mid-level (the
+    // "glitch" that was reported).
+    const towerX = 340 - frame*0.2;
     ctx.fillStyle = '#D9D2C1';
     ctx.fillRect(towerX, groundY-150, 46, 150);
     ctx.fillStyle = '#1A1A2E';
@@ -654,7 +727,7 @@
     ctx.lineWidth=2; ctx.strokeStyle='#1A1A2E';
     ctx.beginPath(); ctx.arc(towerX+23, groundY-130, 13, 0, Math.PI*2); ctx.stroke();
     // small maple leaf marker on a pole
-    const px = 620 - off*0.6;
+    const px = 620 - frame*0.3;
     ctx.strokeStyle = '#8C8C96'; ctx.lineWidth=3;
     ctx.beginPath(); ctx.moveTo(px, groundY-6); ctx.lineTo(px, groundY-90); ctx.stroke();
     ctx.fillStyle = '#B23A2E';
@@ -674,8 +747,12 @@
   // notch brighter than the shared HK-alley scene below, and the gate + lanterns
   // get a soft glow, so the level reads clearly instead of going near-black.
   function sceneTempleStreet(loc){
-    const off = parallaxOffset(0.5);
-    const gx = 400 - off*0.3; // gate drifts slower than the buildings (background landmark)
+    const off = parallaxOffset(0.5, 130); // matches the 130px building spacing below
+    // The gate is a singular landmark (one instance, not a repeating tile), so
+    // like the Markham clock tower it drifts continuously off frame*mult with
+    // no modulo wrap — a wrapped position only looks seamless for something
+    // that repeats, otherwise it snaps back into view mid-level.
+    const gx = 400 - frame*0.15;
 
     // warm ambient glow pooling behind the gate
     const glow = ctx.createRadialGradient(gx, groundY-140, 20, gx, groundY-140, 240);
@@ -698,7 +775,7 @@
     }
 
     // strung paper lanterns, glowing
-    const lo2 = parallaxOffset(0.9);
+    const lo2 = parallaxOffset(0.9, 95); // matches the 95px lantern spacing below
     ctx.shadowColor = 'rgba(213,80,47,0.9)';
     ctx.shadowBlur = 12;
     for(let i=-1;i<8;i++){
@@ -757,40 +834,53 @@
   }
 
   // Mong Kok: the densest, most neon-saturated night market level — signature
-  // element is layered, glowing shop signage stacked several deep on both
-  // sides of the street (vertical AND horizontal signboards in overlapping
-  // colors), matching the reference photo's "signage overload" feel. Built as
-  // a dedicated procedural scene (like sceneTempleStreet) rather than the real
+  // element is layered, glowing shop signage on both sides of the street,
+  // matching the reference photo's "signage overload" feel. Built as a
+  // dedicated procedural scene (like sceneTempleStreet) rather than the real
   // photo backdrop that was here before 2026-07-21 — the photo's baked-in
   // perspective didn't line up with the game's flat ground plane, which made
   // the runner look like it was floating instead of standing on the street.
-  // Keeping this fully procedural guarantees the ground line always matches
-  // player physics, and it moves at the same real-time speed as everything
-  // else post the delta-time fix above.
+  //
+  // Perf/legibility revision (2026-07-21, same day): the first version of this
+  // scene put ctx.shadowBlur on three signs per building (~27 blurred fills
+  // every frame) plus two full-screen radial gradients rebuilt every frame.
+  // shadowBlur is one of the more expensive canvas 2D ops, and on hardware
+  // that couldn't sustain it, real per-frame render time went up — which,
+  // combined with the delta-time fix above, meant the game correctly kept
+  // real-world pace but in fewer/bigger jumps, reading as "too quick" and
+  // making the player/obstacles look like they were hovering against all the
+  // glow right at ground level. Fixed by: cutting shadowBlur down to one sign
+  // per building (the rest fake glow with flat saturated color + alpha, no
+  // blur cost), caching the two gradients instead of rebuilding them every
+  // frame, and pulling the signage bands back up off the ground line so they
+  // read as signs, not a competing "second ground."
+  let _mongKokGlowA = null, _mongKokGlowB = null;
   function sceneMongKok(loc){
-    const off = parallaxOffset(0.5);
+    const off = parallaxOffset(0.5, 110); // matches the 110px building spacing below
     const neon = ['#E0507A','#3FB8C4','#E8C24A','#D5502F','#8C5AD8'];
 
-    // two overlapping ambient neon glows behind the street for that saturated,
-    // slightly overwhelming Mong Kok night-market wash
-    const glowA = ctx.createRadialGradient(200, groundY-140, 20, 200, groundY-140, 260);
-    glowA.addColorStop(0, 'rgba(224,80,122,0.22)');
-    glowA.addColorStop(1, 'rgba(224,80,122,0)');
-    ctx.fillStyle = glowA;
+    // two overlapping ambient neon glows, cached after first build (their
+    // coordinates are fixed screen positions, not tied to scroll offset)
+    if(!_mongKokGlowA){
+      _mongKokGlowA = ctx.createRadialGradient(200, groundY-140, 20, 200, groundY-140, 260);
+      _mongKokGlowA.addColorStop(0, 'rgba(224,80,122,0.22)');
+      _mongKokGlowA.addColorStop(1, 'rgba(224,80,122,0)');
+      _mongKokGlowB = ctx.createRadialGradient(620, groundY-160, 20, 620, groundY-160, 260);
+      _mongKokGlowB.addColorStop(0, 'rgba(63,184,196,0.18)');
+      _mongKokGlowB.addColorStop(1, 'rgba(63,184,196,0)');
+    }
+    ctx.fillStyle = _mongKokGlowA;
     ctx.fillRect(0,0,LOGICAL_W,LOGICAL_H);
-    const glowB = ctx.createRadialGradient(620, groundY-160, 20, 620, groundY-160, 260);
-    glowB.addColorStop(0, 'rgba(63,184,196,0.18)');
-    glowB.addColorStop(1, 'rgba(63,184,196,0)');
-    ctx.fillStyle = glowB;
+    ctx.fillStyle = _mongKokGlowB;
     ctx.fillRect(0,0,LOGICAL_W,LOGICAL_H);
 
     // distant, dimmer building layer (slower parallax = reads as further back)
-    const farOff = parallaxOffset(0.3);
+    const farOff = parallaxOffset(0.3, 110); // same 110px spacing as the near layer
     for(let i=-1;i<8;i++){
       const bx = i*110 - farOff;
       ctx.fillStyle = '#12101F';
       ctx.fillRect(bx, groundY-220, 90, 220);
-      ctx.globalAlpha = 0.4;
+      ctx.globalAlpha = 0.35;
       ctx.fillStyle = neon[(i+2)%neon.length];
       ctx.fillRect(bx+80, groundY-200, 10, 60);
       ctx.globalAlpha = 1;
@@ -809,19 +899,20 @@
       }
     }
 
-    // layered neon signboards: two vertical signs per building at different
-    // depths/colors, plus a glowing horizontal shopfront band — stacked to
-    // read as signage overload rather than one sign per building
-    ctx.shadowBlur = 10;
+    // layered neon signboards — only the near, primary sign per building gets
+    // the (costly) shadowBlur glow; the rest fake glow with flat saturated
+    // color + alpha so a full row of buildings stays cheap to draw every frame
     for(let i=-1;i<8;i++){
       const bx = i*110 - off;
 
       const c1 = neon[(i+neon.length)%neon.length];
       ctx.shadowColor = c1;
+      ctx.shadowBlur = 8;
       ctx.fillStyle = c1;
       ctx.globalAlpha = 0.85 + Math.sin(frame*0.05+i)*0.1;
       ctx.fillRect(bx+90, groundY-170, 13, 70);
       ctx.globalAlpha = 1;
+      ctx.shadowBlur = 0;
       ctx.strokeStyle = 'rgba(255,255,255,0.8)'; ctx.lineWidth=1;
       ctx.strokeRect(bx+90, groundY-170, 13, 70);
       for(let s=0;s<3;s++){
@@ -830,23 +921,22 @@
       }
 
       const c2 = neon[(i+2)%neon.length];
-      ctx.shadowColor = c2;
       ctx.fillStyle = c2;
       ctx.globalAlpha = 0.7;
       ctx.fillRect(bx+8, groundY-210, 11, 55);
       ctx.globalAlpha = 1;
 
+      // horizontal shopfront band, kept well up off the ground line so it
+      // reads as signage rather than a second, competing ground plane
       const c3 = neon[(i+4)%neon.length];
-      ctx.shadowColor = c3;
       ctx.fillStyle = c3;
-      ctx.globalAlpha = 0.55;
-      ctx.fillRect(bx+4, groundY-46, 60, 10);
+      ctx.globalAlpha = 0.5;
+      ctx.fillRect(bx+4, groundY-70, 60, 8);
       ctx.globalAlpha = 1;
     }
-    ctx.shadowBlur = 0;
 
     // string of small overhead market lights
-    const lo = parallaxOffset(0.9);
+    const lo = parallaxOffset(0.9, 70); // matches the 70px light spacing below
     for(let i=-1;i<10;i++){
       const lx = i*70 - lo;
       const ly = groundY-205 + Math.sin(i*1.7)*4;
@@ -854,18 +944,19 @@
       ctx.beginPath(); ctx.arc(lx, ly, 2.5, 0, Math.PI*2); ctx.fill();
     }
 
-    // ground-level stall awnings
+    // ground-level detail, dim and thin so the true ground plane (drawn right
+    // after this function returns) stays the single clear visual anchor
     for(let i=-1;i<8;i++){
       const bx = i*110 - off + 6;
-      ctx.fillStyle = '#3FB8C4';
-      ctx.fillRect(bx, groundY-28, 55, 8);
+      ctx.fillStyle = 'rgba(63,184,196,0.6)';
+      ctx.fillRect(bx, groundY-10, 55, 6);
     }
   }
 
   // Sham Shui Po: humble daytime market — bamboo poles with hanging laundry
   // jutting from tong-lau windows is the iconic, instantly-readable HK visual.
   function sceneShamShuiPo(loc){
-    const off = parallaxOffset(0.45);
+    const off = parallaxOffset(0.45, 140); // matches the 140px building/stall spacing below
     for(let i=-1;i<7;i++){
       const bx = i*140 - off;
       ctx.fillStyle = '#DCCFAE';
@@ -897,7 +988,7 @@
   // Yau Ma Tei / Jade Market: daytime, green-toned stalls with round jade-disc
   // decorations strung along canvas awnings.
   function sceneYauMaTei(loc){
-    const off = parallaxOffset(0.45);
+    const off = parallaxOffset(0.45, 110); // matches the 110px stall spacing below
     for(let i=-1;i<8;i++){
       const bx = i*110 - off;
       ctx.fillStyle = i%2===0 ? '#3E7A5E' : '#5E9A7A';
@@ -916,13 +1007,17 @@
   // Cheung Chau: sunset pier — wooden posts, boat silhouettes on the water,
   // and a small lighthouse marking the harbour end.
   function sceneCheungChau(loc){
-    const off = parallaxOffset(0.4);
+    // Boats and pier posts are separate tiled layers at different spacing —
+    // previously both reused one shared offset scaled by different factors,
+    // which matched neither layer's actual spacing and glitched on wrap.
+    const boatOff = parallaxOffset(0.24, 180);  // matches the 180px boat spacing below
+    const postOff = parallaxOffset(0.4, 80);    // matches the 80px post spacing below
     // sun
     ctx.fillStyle = 'rgba(255,255,255,0.5)';
     ctx.beginPath(); ctx.arc(620, groundY-190, 34, 0, Math.PI*2); ctx.fill();
     // distant boats
     for(let i=-1;i<5;i++){
-      const bx = i*180 - off*0.6 + 60;
+      const bx = i*180 - boatOff + 60;
       ctx.fillStyle = 'rgba(26,26,46,0.55)';
       ctx.beginPath();
       ctx.moveTo(bx, groundY-72); ctx.lineTo(bx+34,groundY-72); ctx.lineTo(bx+26,groundY-60); ctx.lineTo(bx+6,groundY-60);
@@ -931,7 +1026,7 @@
     }
     // pier posts in foreground
     for(let i=-1;i<10;i++){
-      const px = i*80 - off + 20;
+      const px = i*80 - postOff + 20;
       ctx.fillStyle = '#5C4530';
       ctx.fillRect(px, groundY-40, 8, 40);
     }
