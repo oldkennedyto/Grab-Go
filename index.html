@@ -170,6 +170,19 @@
     100%{ transform:scale(1); opacity:0; }
   }
   .countdown.pulse{ animation: countdownPulse 0.6s ease-out; }
+  .duckBtn{
+    position:absolute; right:14px; bottom:14px; z-index:6;
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:1px;
+    width:60px; height:60px; border-radius:50%;
+    background: rgba(26,26,46,0.82); color:var(--white); border:2px solid var(--white);
+    font-size:20px; line-height:1; cursor:pointer;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: none; /* this button owns its own press/release, not scroll/zoom gestures */
+  }
+  .duckBtn span{
+    font-family:'Baloo 2', sans-serif; font-size:9px; font-weight:800; letter-spacing:0.5px;
+  }
+  .duckBtn:active{ background: rgba(140,90,52,0.9); }
   .overlay{
     position:absolute; inset:0;
     background: rgba(250,250,248,0.96);
@@ -193,6 +206,9 @@
   .btn.secondary{
     background: var(--white); color:var(--navy); border: 2px solid var(--navy);
     box-shadow:none;
+  }
+  .overBtns{
+    display:flex; gap:10px; flex-wrap:wrap; justify-content:center;
   }
   .hint{
     text-align:center; font-size:12px; color:#8A8A96; margin-top:10px; font-weight:600;
@@ -263,6 +279,7 @@
     </div>
     <div class="locbanner" id="locBanner"><span id="locName"></span><span class="sub" id="locSub"></span></div>
     <div class="countdown" id="countdown"></div>
+    <button class="duckBtn" id="duckBtn" aria-label="Duck">⬇<span>DUCK</span></button>
 
     <div class="overlay" id="startOverlay">
       <h2>Grab &amp; Go</h2>
@@ -279,7 +296,10 @@
         <label for="playerName">Playing as</label>
         <input id="playerName" maxlength="24" placeholder="Your name">
       </div>
-      <button class="btn" id="againBtn">Play Again</button>
+      <div class="overBtns">
+        <button class="btn" id="againBtn">Play Again</button>
+        <button class="btn secondary" id="shareBtn">Share Your Run</button>
+      </div>
     </div>
   </div>
 
@@ -471,13 +491,24 @@
 
   const player = {
     x: 90, y: 0, w: 46, h: 54,
-    vy: 0, jumping:false, legPhase:0, jumpPunch:0, landPunch:0
+    vy: 0, jumping:false, legPhase:0, jumpPunch:0, landPunch:0,
+    ducking:false, duckAmount:0 // duckAmount eases 0→1 for a snappy-but-not-instant crouch
   };
   const GRAVITY = 0.62, JUMP_V = -13.4;
   const JUMP_CUT = 0.45;       // releasing early while still rising cuts the jump short (variable height)
   const JUMP_BUFFER_FRAMES = 8; // grace window: a tap just before landing still fires the next jump
   let jumpBufferTimer = 0;
   let holdingJump = false;
+
+  // Duck mechanic — a second input beyond jump, for the low hanging-banner
+  // obstacle (see spawnObstacleAt). duckHeld reflects whatever the input
+  // (ArrowDown/S key, or the on-screen duck button) currently reports; the
+  // actual player.ducking state only follows it while grounded (see update()),
+  // so holding duck mid-jump doesn't do anything until landing.
+  let duckHeld = false;
+  const PLAYER_DUCK_HITBOX_H = 28; // collision-only height while ducking; rendering height (player.h) never changes, so the procedural cup art's fixed offsets stay valid — see drawPlayer's duckAmount squash instead
+  const NEAR_MISS_BONUS = 10; // awarded for clearing a ground obstacle while still airborne as it passes
+  const DUCK_BONUS = 10;      // awarded for successfully ducking a banner as it passes
 
   let obstacles = [];
   let collectibles = [];
@@ -486,6 +517,12 @@
   let popups = [];
   let shakeFrames = 0, shakeMag = 0;
   let frame = 0;
+
+  // Collect-streak multiplier: consecutive collectibles picked up without
+  // letting one scroll off-screen uncollected. Unlike obstacles (any hit ends
+  // the run), collectibles are the one thing in this game you can "miss"
+  // without dying, so they're the natural fit for a risk/reward streak.
+  let collectStreak = 0;
 
   // Level-to-level background crossfade (see drawBackground/drawSceneLayer).
   // prevLevelIndex holds the location being faded OUT of; null means no
@@ -501,9 +538,11 @@
     obstacles = []; collectibles = []; particles = []; popups = [];
     player.y = groundY - player.h; player.vy = 0; player.jumping = false;
     player.jumpPunch = 0; player.landPunch = 0;
+    player.ducking = false; player.duckAmount = 0; duckHeld = false;
     jumpBufferTimer = 0; holdingJump = false; shakeFrames = 0;
     prevLevelIndex = null; transitionT = 0;
     spawnTimer = 0; nextSpawnAt = 60; frame = 0;
+    collectStreak = 0;
     updateHud();
     showLocationBanner(true);
   }
@@ -554,18 +593,33 @@
     if(e.code === 'Space' || e.code === 'ArrowUp'){
       e.preventDefault();
       if(!holdingJump){ holdingJump = true; tryJump(); }
+    } else if(e.code === 'ArrowDown' || e.code === 'KeyS'){
+      e.preventDefault();
+      duckHeld = true;
     }
   });
   window.addEventListener('keyup', (e)=>{
     if(e.code === 'Space' || e.code === 'ArrowUp'){ releaseJump(); }
+    else if(e.code === 'ArrowDown' || e.code === 'KeyS'){ duckHeld = false; }
   });
   stage.addEventListener('pointerdown', (e)=>{
-    if(e.target.closest('.overlay button') || e.target.closest('input')) return;
+    if(e.target.closest('.overlay button') || e.target.closest('input') || e.target.closest('#duckBtn')) return;
     holdingJump = true;
     tryJump();
   });
   stage.addEventListener('pointerup', releaseJump);
   stage.addEventListener('pointercancel', releaseJump);
+
+  // Dedicated duck button for touch — deliberately a separate button rather
+  // than a swipe gesture on the whole stage, since the stage's pointerdown
+  // already fires jump immediately on touch-start for responsiveness; trying
+  // to also read swipe-down from the same touch would either delay jump (bad)
+  // or cause an accidental jump at the start of every duck swipe.
+  const duckBtn = document.getElementById('duckBtn');
+  duckBtn.addEventListener('pointerdown', (e)=>{ e.stopPropagation(); duckHeld = true; });
+  duckBtn.addEventListener('pointerup', ()=>{ duckHeld = false; });
+  duckBtn.addEventListener('pointercancel', ()=>{ duckHeld = false; });
+  duckBtn.addEventListener('pointerleave', ()=>{ duckHeld = false; });
 
   document.getElementById('startBtn').addEventListener('click', startGame);
   document.getElementById('againBtn').addEventListener('click', startGame);
@@ -610,14 +664,35 @@
   function spawnObstacleAt(x, forcedType){
     const types = ['puddle','ice','sign'];
     const t = forcedType || types[Math.floor(Math.random()*types.length)];
-    let w,h;
-    if(t==='puddle'){ w=54; h=14; }
-    else if(t==='ice'){ w=32; h=32; }
-    else { w=26; h=48; }
-    obstacles.push({ type:t, x, y: groundY - h, w, h });
+    let w,h,y;
+    if(t==='puddle'){ w=54; h=14; y=groundY-h; }
+    else if(t==='ice'){ w=32; h=32; y=groundY-h; }
+    else if(t==='banner'){
+      // Hangs from above with a gap only a ducked player fits under — the
+      // duck-only counterpart to the ground obstacles. Tall enough to extend
+      // well past jump apex height (~145px at current GRAVITY/JUMP_V), so
+      // jumping into it isn't a valid way past — ducking is the only way through.
+      w = 70;
+      const clearance = 36; // > PLAYER_DUCK_HITBOX_H(28), < standing height(54)
+      h = 220;
+      y = groundY - clearance - h;
+    }
+    else { w=26; h=48; y=groundY-h; }
+    obstacles.push({ type:t, x, y, w, h, bonusChecked:false });
     return w;
   }
   function spawnObstacle(){
+    // Hanging banners (duck-only) are introduced from level 2 onward and
+    // spawn as their own dedicated, uncrowded moment — never mixed into a
+    // jump cluster, so the new mechanic reads clearly instead of competing
+    // with tight jump timing right out of the gate. Markham (level 1) stays
+    // jump-only so first-time players learn one mechanic at a time.
+    const bannerChance = levelIndex >= 1 ? Math.min(0.22, 0.08 + levelIndex*0.03) : 0;
+    if(Math.random() < bannerChance){
+      spawnObstacleAt(LOGICAL_W + 20, 'banner');
+      return;
+    }
+
     // Clusters get more likely as levels climb, so the real challenge shifts
     // from "spot the obstacle" to "read the rhythm at speed." Capped at 2
     // obstacles per cluster — playtesting found 3 in a row unjumpable.
@@ -675,6 +750,13 @@
     if(player.jumpPunch > 0) player.jumpPunch = Math.max(0, player.jumpPunch - 0.12*dt);
     if(player.landPunch > 0) player.landPunch = Math.max(0, player.landPunch - 0.08*dt);
 
+    // ducking — grounded only; holding the duck input mid-air does nothing
+    // until landing, since it's a crouch, not an air maneuver. duckAmount eases
+    // toward the target each frame for a quick-but-not-instant crouch in the render.
+    player.ducking = !player.jumping && duckHeld;
+    const duckTarget = player.ducking ? 1 : 0;
+    player.duckAmount += (duckTarget - player.duckAmount) * Math.min(1, 0.35*dt);
+
     // score / speed
     score += speed * 0.045 * dt;
     const targetLevel = Math.min(LOCATIONS.length-1, Math.floor(score / LEVEL_DISTANCE));
@@ -702,26 +784,58 @@
       if(Math.random() < 0.55) spawnCollectible();
     }
 
+    // Collision hitbox is smaller than the rendered player while ducking — see
+    // PLAYER_DUCK_HITBOX_H above. player.w/h/y stay at full standing size for
+    // rendering (drawPlayer's squash transform handles the visual crouch), so
+    // this is the only place duck actually changes what can be hit.
+    const hitbox = player.ducking
+      ? { x:player.x, y:player.y+(player.h-PLAYER_DUCK_HITBOX_H), w:player.w, h:PLAYER_DUCK_HITBOX_H }
+      : player;
+
     // move + collide obstacles
     for(let i=obstacles.length-1;i>=0;i--){
       const o = obstacles[i];
       o.x -= speed * dt;
       if(o.x + o.w < 0){ obstacles.splice(i,1); continue; }
-      if(rectHit(player, o)){
+      if(rectHit(hitbox, o)){
         endGame();
         return;
+      }
+      // Near-miss (ground obstacles, cleared while still airborne) / duck bonus
+      // (banners, cleared while ducking) — checked once, right as it passes.
+      if(!o.bonusChecked && o.x + o.w < player.x){
+        o.bonusChecked = true;
+        if(o.type === 'banner'){
+          if(player.ducking){
+            score += DUCK_BONUS;
+            popups.push({x:player.x+player.w/2, y:player.y-10, text:'Duck! +'+DUCK_BONUS, life:36, color: loc.accent});
+          }
+        } else if(player.jumping){
+          score += NEAR_MISS_BONUS;
+          popups.push({x:player.x+player.w/2, y:player.y-10, text:'Close one! +'+NEAR_MISS_BONUS, life:36, color: loc.accent});
+        }
       }
     }
     // move + collect collectibles
     for(let i=collectibles.length-1;i>=0;i--){
       const c = collectibles[i];
       c.x -= speed * dt;
-      if(c.x + c.w < 0){ collectibles.splice(i,1); continue; }
-      if(!c.collected && rectHit(player, c)){
+      if(c.x + c.w < 0){
+        if(!c.collected) collectStreak = 0; // scrolled off uncollected — streak resets
+        collectibles.splice(i,1); continue;
+      }
+      if(!c.collected && rectHit(hitbox, c)){
         c.collected = true;
-        const gain = (c.type==='lemon' ? 40 : 25);
+        collectStreak++;
+        // Streak multiplier — up to 2.5x around a 15-streak. Collectibles are
+        // the one thing in this game you can miss without dying, so they're
+        // the natural risk/reward lever (see collectStreak comment above).
+        const streakMult = 1 + Math.min(1.5, (collectStreak-1)*0.1);
+        const base = (c.type==='lemon' ? 40 : 25);
+        const gain = Math.round(base * streakMult);
         score += gain;
-        popups.push({x:c.x+c.w/2, y:c.y, text:'+'+gain, life:36, color: loc.accent});
+        const label = collectStreak >= 3 ? ('+'+gain+' (x'+collectStreak+'!)') : ('+'+gain);
+        popups.push({x:c.x+c.w/2, y:c.y, text:label, life:36, color: loc.accent});
         playTone(c.type==='lemon' ? 880 : 740, 0.08, 'sine');
         for(let p=0;p<8;p++){
           particles.push({x:c.x+c.w/2, y:c.y+c.h/2, vx:(Math.random()-0.5)*4, vy:-Math.random()*3-1, life:24, color: loc.accent});
@@ -1222,8 +1336,13 @@
     const jumpLean = player.jumping ? Math.max(-0.18, Math.min(0.18, player.vy*0.012)) : 0;
     const stretch = player.jumpPunch * 0.16; // taller/thinner right at takeoff
     const squash = player.landPunch * 0.22;  // flatter/wider right on landing
-    const scaleY = 1 - runSquash + stretch - squash;
-    const scaleX = 1 - stretch*0.6 + squash*0.6;
+    // Duck crouch — reuses this same squash system (anchored at the feet via
+    // the translate below) rather than changing player.w/h, so the procedural
+    // art's fixed pixel offsets (face, straw, etc.) never go out of proportion.
+    // The actual smaller collision box while ducking lives in update()/hitbox.
+    const duckSquash = player.duckAmount * 0.42;
+    const scaleY = 1 - runSquash + stretch - squash - duckSquash;
+    const scaleX = 1 - stretch*0.6 + squash*0.6 + player.duckAmount*0.22;
 
     ctx.save();
     ctx.translate(x+w/2, y+h);
@@ -1338,6 +1457,21 @@
       ctx.textAlign = 'center';
       ctx.fillText('SOLD', o.x+o.w/2, o.y+9);
       ctx.fillText('OUT', o.x+o.w/2, o.y+17);
+    } else if(o.type === 'banner'){
+      // Hanging duck-only obstacle — a market awning/banner strung overhead.
+      // The tasseled bottom trim is deliberately the clearest visual element
+      // so the "duck line" reads instantly at speed.
+      ctx.fillStyle = '#1A1A2E';
+      ctx.fillRect(o.x, o.y, o.w, o.h);
+      ctx.fillStyle = 'rgba(255,255,255,0.10)';
+      for(let s=0;s<4;s++){ ctx.fillRect(o.x+6+s*16, o.y, 8, o.h); }
+      const bottomY = o.y + o.h;
+      ctx.fillStyle = '#8C5A34';
+      ctx.fillRect(o.x, bottomY-6, o.w, 6);
+      for(let t=0;t<5;t++){
+        const tx = o.x + 6 + t*(o.w-12)/4;
+        ctx.fillRect(tx-1.5, bottomY, 3, 10);
+      }
     }
   }
 
@@ -1564,6 +1698,103 @@
   function escapeHtml(s){
     return String(s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
   }
+
+  // ---------- Share card ----------
+  // The game's actual job is Instagram engagement, and right now a good run
+  // has no way to leave the browser. This composes a fresh, story-shaped
+  // (1080x1920) recap image on an offscreen canvas — not just a screenshot of
+  // the game — with the score, level reached, both real product bottles for
+  // recognition, and the brand mark, then hands it to the native share sheet
+  // on mobile (falls back to triggering a download on desktop/unsupported
+  // browsers). Reuses assets already embedded in the page (the header logo
+  // <img>, and SPRITES.cup/lemon loaded for in-game rendering) rather than
+  // loading anything new.
+  function buildShareCard(){
+    const W = 1080, H = 1920;
+    const c = document.createElement('canvas');
+    c.width = W; c.height = H;
+    const g = c.getContext('2d');
+
+    g.fillStyle = '#FFFFFF';
+    g.fillRect(0,0,W,H);
+    g.fillStyle = 'rgba(26,26,46,0.05)';
+    g.fillRect(0,0,W,10);
+    g.fillRect(0,H-10,W,10);
+
+    const logoImg = document.querySelector('.brandbar .logo');
+    if(logoImg && logoImg.complete && logoImg.naturalWidth){
+      const logoH = 200;
+      const logoW = logoImg.naturalWidth * (logoH/logoImg.naturalHeight);
+      g.drawImage(logoImg, (W-logoW)/2, 150, logoW, logoH);
+    }
+
+    g.textAlign = 'center';
+
+    const name = (loadPlayerName() || '').trim();
+    g.font = "700 46px 'Baloo 2', sans-serif";
+    g.fillStyle = '#1A1A2E';
+    g.fillText(name ? name + "'s run" : 'My Grab & Go run', W/2, 470);
+
+    g.font = "800 210px 'Baloo 2', sans-serif";
+    g.fillStyle = '#8C5A34';
+    g.fillText(String(Math.floor(score)), W/2, 700);
+    g.font = "700 38px sans-serif";
+    g.fillStyle = '#8A8A96';
+    g.fillText('POINTS', W/2, 745);
+
+    const loc = LOCATIONS[levelIndex];
+    g.font = "700 54px 'Baloo 2', sans-serif";
+    g.fillStyle = '#1A1A2E';
+    g.fillText('Reached ' + loc.name, W/2, 850);
+    if(loc.sub){
+      g.font = "400 32px sans-serif";
+      g.fillStyle = '#8A8A96';
+      g.fillText(loc.sub, W/2, 895);
+    }
+
+    g.strokeStyle = '#C99A6C'; g.lineWidth = 4;
+    g.beginPath(); g.moveTo(W/2-140, 960); g.lineTo(W/2+140, 960); g.stroke();
+
+    const bw = 260, bh = 300, gap = 60;
+    const startX = (W - (bw*2+gap)) / 2;
+    if(SPRITES.cup) g.drawImage(SPRITES.cup, startX, 1030, bw, bh);
+    if(SPRITES.lemon) g.drawImage(SPRITES.lemon, startX+bw+gap, 1030, bw, bh);
+
+    g.font = "800 50px 'Baloo 2', sans-serif";
+    g.fillStyle = '#1A1A2E';
+    g.fillText('Grab & Go', W/2, 1510);
+    g.font = "700 36px sans-serif";
+    g.fillStyle = '#8C5A34';
+    g.fillText('@oldkennedy.to · GTA Markets', W/2, 1565);
+    g.font = "400 30px sans-serif";
+    g.fillStyle = '#8A8A96';
+    g.fillText('Can you beat this score?', W/2, 1615);
+
+    return c;
+  }
+
+  function shareRun(){
+    const card = buildShareCard();
+    card.toBlob(async (blob) => {
+      if(!blob) return;
+      const file = new File([blob], 'grab-and-go-score.png', { type: 'image/png' });
+      if(navigator.canShare && navigator.canShare({ files:[file] })){
+        try{
+          await navigator.share({ files:[file], title:'Grab & Go', text:'Can you beat my score?' });
+          return;
+        }catch(e){
+          // user backed out of the share sheet, or it's unsupported mid-call —
+          // fall through to the download fallback below rather than fail silently
+        }
+      }
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'grab-and-go-score.png';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(()=>URL.revokeObjectURL(url), 2000);
+    }, 'image/png');
+  }
+  document.getElementById('shareBtn').addEventListener('click', shareRun);
 
   // ---------- Init ----------
   updateRotateHint(); // must run before fitCanvas so its layout is accounted for
