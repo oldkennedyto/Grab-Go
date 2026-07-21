@@ -124,6 +124,29 @@
     font-size: 11px; color: var(--navy-soft); font-weight:700; margin-top:3px; text-align:right;
     background: rgba(255,255,255,0.85); border-radius:6px; padding:2px 8px;
   }
+  .boostBadge{
+    /* Shown only while a double-jump charge is held (see updateHud()) — a
+       quiet, persistent reminder rather than a one-off popup, since the
+       charge can be carried for a while before it's actually spent. */
+    margin-top: 4px; display:none;
+    background: #1A1A2E; color: var(--white);
+    border-radius: 8px; padding: 3px 9px;
+    font-size: 11px; font-weight:700; letter-spacing:0.3px;
+    width: fit-content;
+  }
+  .boostBadge.show{ display:block; }
+  .streakBadge{
+    /* Persistent readout of the collect-streak multiplier, so the risk/reward
+       (don't let a bottle scroll off-screen) is visible the whole time it's
+       building, not just in the fleeting per-pickup popup. Only shown once a
+       streak is actually worth protecting (see updateHud()). */
+    margin-top: 4px; display:none;
+    background: #8C5A34; color: var(--white);
+    border-radius: 8px; padding: 3px 9px;
+    font-size: 11px; font-weight:700; letter-spacing:0.3px;
+    width: fit-content;
+  }
+  .streakBadge.show{ display:block; }
   .locbanner{
     /* Was positioned with a hardcoded top:-40px "hidden" offset, which assumed
        a fixed height — once the text ran long (e.g. "Yau Ma Tei 油麻地 · JADE
@@ -164,37 +187,6 @@
     100%{ transform:scale(1); opacity:0; }
   }
   .countdown.pulse{ animation: countdownPulse 0.6s ease-out; }
-  .duckBtn{
-    /* Revamped 2026-07-21: was a 60px circle stuck in the corner, hard to hit
-       reliably one-handed on phone (right-thumb-only reachable) and easy to
-       confuse for decoration since nothing signaled why it existed. Now a
-       much bigger bottom-center pill, reachable by either thumb, with an
-       explicit label so its purpose is obvious without reading instructions. */
-    position:absolute; left:50%; bottom:16px; transform:translateX(-50%); z-index:6;
-    display:flex; align-items:center; justify-content:center; gap:8px;
-    min-width:150px; height:64px; padding:0 22px; border-radius:32px;
-    background: rgba(26,26,46,0.88); color:var(--white); border:2px solid var(--white);
-    font-family:'Baloo 2', sans-serif; font-size:16px; font-weight:800; letter-spacing:0.5px;
-    line-height:1; cursor:pointer; box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-    -webkit-tap-highlight-color: transparent;
-    touch-action: manipulation; /* matches the rest of the page; avoids conflicting with an ancestor's touch-action */
-    user-select: none; -webkit-user-select: none;
-  }
-  .duckBtn .arrow{ font-size:20px; }
-  .duckBtn:active, .duckBtn.pressed{ background: rgba(140,90,52,0.95); transform:translateX(-50%) scale(0.96); }
-  .duckTip{
-    position:absolute; left:50%; top:38%; z-index:7;
-    transform: translate(-50%,-50%) scale(0.85);
-    background: var(--navy); color:var(--white);
-    padding: 10px 20px; border-radius: 12px;
-    font-family:'Baloo 2', sans-serif; font-weight:700; font-size:18px;
-    text-align:center; white-space:nowrap;
-    opacity:0; pointer-events:none;
-    transition: opacity 0.35s ease, transform 0.35s cubic-bezier(.2,.9,.3,1.3);
-    box-shadow: 0 6px 14px rgba(0,0,0,0.3);
-  }
-  .duckTip b{ color:#E8C24A; }
-  .duckTip.show{ opacity:1; transform: translate(-50%,-50%) scale(1); }
   .overlay{
     position:absolute; inset:0;
     background: rgba(250,250,248,0.96);
@@ -278,7 +270,11 @@
   <div class="stage" id="stage">
     <canvas id="game"></canvas>
     <div class="hud">
-      <div class="score" id="scoreLabel">0</div>
+      <div>
+        <div class="score" id="scoreLabel">0</div>
+        <div class="boostBadge" id="boostBadge">⚡ Double Jump Ready</div>
+        <div class="streakBadge" id="streakBadge"></div>
+      </div>
       <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;pointer-events:auto;">
         <div style="display:flex;gap:4px;">
           <button id="fsBtn" aria-label="Fullscreen" style="border:2px solid var(--navy);background:var(--white);border-radius:8px;padding:1px 8px;font-size:13px;cursor:pointer;line-height:1.5;">⛶</button>
@@ -289,8 +285,6 @@
     </div>
     <div class="locbanner" id="locBanner"><span id="locName"></span><span class="sub" id="locSub"></span></div>
     <div class="countdown" id="countdown"></div>
-    <button class="duckBtn" id="duckBtn" aria-label="Duck"><span class="arrow">⬇</span><span>HOLD TO DUCK</span></button>
-    <div class="duckTip" id="duckTip">Hold <b>DUCK</b> to slide under!</div>
 
     <div class="overlay" id="startOverlay">
       <h2>Grab &amp; Go</h2>
@@ -552,7 +546,11 @@
     // width-related. h stays 54 (vertical, tied to jump physics, unscaled).
     x: 90*PORTRAIT_SCALE, y: 0, w: 46*PORTRAIT_SCALE, h: 54,
     vy: 0, jumping:false, legPhase:0, jumpPunch:0, landPunch:0,
-    ducking:false, duckAmount:0 // duckAmount eases 0→1 for a snappy-but-not-instant crouch
+    // Double-jump power-up state (see 'boost' collectible / doDoubleJump()).
+    // hasBoost is an earned charge that persists across multiple jumps until
+    // actually spent; midAirBoostUsed just blocks spending it twice in the
+    // same airtime and is cleared on landing so a fresh jump can use it again.
+    hasBoost:false, midAirBoostUsed:false
   };
   const GRAVITY = 0.62, JUMP_V = -13.4;
   const JUMP_CUT = 0.45;       // releasing early while still rising cuts the jump short (variable height)
@@ -560,15 +558,7 @@
   let jumpBufferTimer = 0;
   let holdingJump = false;
 
-  // Duck mechanic — a second input beyond jump, for the low hanging-banner
-  // obstacle (see spawnObstacleAt). duckHeld reflects whatever the input
-  // (ArrowDown/S key, or the on-screen duck button) currently reports; the
-  // actual player.ducking state only follows it while grounded (see update()),
-  // so holding duck mid-jump doesn't do anything until landing.
-  let duckHeld = false;
-  const PLAYER_DUCK_HITBOX_H = 28; // collision-only height while ducking; rendering height (player.h) never changes, so the procedural cup art's fixed offsets stay valid — see drawPlayer's duckAmount squash instead
-  const NEAR_MISS_BONUS = 10; // awarded for clearing a ground obstacle while still airborne as it passes
-  const DUCK_BONUS = 10;      // awarded for successfully ducking a banner as it passes
+  const NEAR_MISS_BONUS = 10; // awarded for clearing an obstacle while still airborne as it passes
 
   let obstacles = [];
   let collectibles = [];
@@ -598,7 +588,7 @@
     obstacles = []; collectibles = []; particles = []; popups = [];
     player.y = groundY - player.h; player.vy = 0; player.jumping = false;
     player.jumpPunch = 0; player.landPunch = 0;
-    player.ducking = false; player.duckAmount = 0; duckHeld = false;
+    player.hasBoost = false; player.midAirBoostUsed = false;
     jumpBufferTimer = 0; holdingJump = false; shakeFrames = 0;
     prevLevelIndex = null; transitionT = 0;
     spawnTimer = 0; nextSpawnAt = 60; frame = 0;
@@ -610,6 +600,15 @@
   function updateHud(){
     document.getElementById('scoreLabel').textContent = Math.floor(score);
     document.getElementById('bestLabel').textContent = bestScore ? ('Best ' + Math.floor(bestScore)) : '';
+    document.getElementById('boostBadge').classList.toggle('show', player.hasBoost);
+    const streakEl = document.getElementById('streakBadge');
+    if(collectStreak >= 3){
+      const mult = (1 + Math.min(1.5, (collectStreak-1)*0.1)).toFixed(1);
+      streakEl.textContent = '🔥 Streak x'+collectStreak+' ('+mult+'x)';
+      streakEl.classList.add('show');
+    } else {
+      streakEl.classList.remove('show');
+    }
   }
 
   function showLocationBanner(instant){
@@ -632,12 +631,32 @@
     jumpBufferTimer = 0;
     playTone(660, 0.07, 'square');
   }
+  // Double jump — spends an earned 'boost' charge (see spawnCollectible) for
+  // one extra mid-air jump. Deliberately still just a tap: it fires from the
+  // exact same tryJump() input as a normal jump, triggered only by context
+  // (already airborne + holding a charge), so it never becomes a second
+  // control players have to learn or manage — same lesson learned from
+  // removing the duck button.
+  function doDoubleJump(){
+    player.vy = JUMP_V * 0.92; // very slightly gentler than the first jump so it doesn't feel identical/overpowered
+    player.jumpPunch = 1;
+    player.midAirBoostUsed = true;
+    player.hasBoost = false;
+    playTone(880, 0.09, 'square');
+    popups.push({x:player.x+player.w/2, y:player.y-14, text:'Double Jump!', life:40, color:'#8C5A34'});
+    for(let p=0;p<10;p++){
+      particles.push({x:player.x+player.w/2, y:player.y+player.h/2, vx:(Math.random()-0.5)*5, vy:-Math.random()*3-1, life:26, color:'#8C5A34'});
+    }
+    updateHud();
+  }
   function tryJump(){
     ensureAudio();
     if(state === 'ready'){ startGame(); return; }
     if(state !== 'playing') return;
     if(!player.jumping){
       doJump();
+    } else if(player.hasBoost && !player.midAirBoostUsed){
+      doDoubleJump();
     } else {
       jumpBufferTimer = JUMP_BUFFER_FRAMES; // remembered; fires the instant we land
     }
@@ -653,50 +672,18 @@
     if(e.code === 'Space' || e.code === 'ArrowUp'){
       e.preventDefault();
       if(!holdingJump){ holdingJump = true; tryJump(); }
-    } else if(e.code === 'ArrowDown' || e.code === 'KeyS'){
-      e.preventDefault();
-      duckHeld = true;
     }
   });
   window.addEventListener('keyup', (e)=>{
     if(e.code === 'Space' || e.code === 'ArrowUp'){ releaseJump(); }
-    else if(e.code === 'ArrowDown' || e.code === 'KeyS'){ duckHeld = false; }
   });
   stage.addEventListener('pointerdown', (e)=>{
-    if(e.target.closest('.overlay button') || e.target.closest('input') || e.target.closest('#duckBtn')) return;
+    if(e.target.closest('.overlay button') || e.target.closest('input')) return;
     holdingJump = true;
     tryJump();
   });
   stage.addEventListener('pointerup', releaseJump);
   stage.addEventListener('pointercancel', releaseJump);
-
-  // Dedicated duck button for touch — deliberately a separate button rather
-  // than a swipe gesture on the whole stage, since the stage's pointerdown
-  // already fires jump immediately on touch-start for responsiveness; trying
-  // to also read swipe-down from the same touch would either delay jump (bad)
-  // or cause an accidental jump at the start of every duck swipe.
-  const duckBtn = document.getElementById('duckBtn');
-  function startDuck(e){
-    e.preventDefault(); // belt-and-suspenders alongside touch-action: skip any default gesture
-    e.stopPropagation();
-    duckHeld = true;
-    duckBtn.classList.add('pressed');
-  }
-  function endDuck(e){
-    if(e) e.preventDefault();
-    duckHeld = false;
-    duckBtn.classList.remove('pressed');
-  }
-  duckBtn.addEventListener('pointerdown', startDuck);
-  duckBtn.addEventListener('pointerup', endDuck);
-  duckBtn.addEventListener('pointercancel', endDuck);
-  duckBtn.addEventListener('pointerleave', endDuck);
-  // touchstart/touchend fallback — some mobile browsers/webviews have had bugs
-  // where Pointer Events don't register reliably on custom-styled buttons even
-  // when supported elsewhere on the page (e.g. the whole-stage tap-to-jump);
-  // this ensures duck still works even if that happens.
-  duckBtn.addEventListener('touchstart', startDuck, { passive:false });
-  duckBtn.addEventListener('touchend', endDuck, { passive:false });
 
   document.getElementById('startBtn').addEventListener('click', startGame);
   document.getElementById('againBtn').addEventListener('click', startGame);
@@ -737,23 +724,6 @@
     })();
   }
 
-  // Shown once ever (across sessions, via localStorage) the first time a
-  // banner obstacle actually spawns — testers couldn't tell what the duck
-  // mechanic was for, so this spells it out at the exact moment it matters
-  // instead of relying on the start-screen instructions being read/remembered.
-  const DUCK_TIP_KEY = 'grabgo_duck_tip_shown';
-  function showDuckTipIfNeeded(){
-    let shown = false;
-    try{ shown = localStorage.getItem(DUCK_TIP_KEY) === '1'; }catch(e){}
-    if(shown) return;
-    try{ localStorage.setItem(DUCK_TIP_KEY, '1'); }catch(e){}
-    const tip = document.getElementById('duckTip');
-    if(!tip) return;
-    tip.classList.add('show');
-    clearTimeout(showDuckTipIfNeeded._t);
-    showDuckTipIfNeeded._t = setTimeout(()=> tip.classList.remove('show'), 3200);
-  }
-
   // ---------- Spawning ----------
   function spawnObstacleAt(x, forcedType){
     const types = ['puddle','ice','sign'];
@@ -767,34 +737,11 @@
     // squishing it further risked making it barely visible.
     if(t==='puddle'){ w=54*PORTRAIT_SCALE; h=14; y=groundY-h; }
     else if(t==='ice'){ w=32; h=32; y=groundY-h; }
-    else if(t==='banner'){
-      // Hangs from above with a gap only a ducked player fits under — the
-      // duck-only counterpart to the ground obstacles. Tall enough to extend
-      // well past jump apex height (~145px at current GRAVITY/JUMP_V), so
-      // jumping into it isn't a valid way past — ducking is the only way
-      // through. Height/clearance are vertical, unaffected by width scaling.
-      w = 70*PORTRAIT_SCALE;
-      const clearance = 36; // > PLAYER_DUCK_HITBOX_H(28), < standing height(54)
-      h = 220;
-      y = groundY - clearance - h;
-    }
     else { w=26*PORTRAIT_SCALE; h=48; y=groundY-h; }
     obstacles.push({ type:t, x, y, w, h, bonusChecked:false });
     return w;
   }
   function spawnObstacle(){
-    // Hanging banners (duck-only) are introduced from level 2 onward and
-    // spawn as their own dedicated, uncrowded moment — never mixed into a
-    // jump cluster, so the new mechanic reads clearly instead of competing
-    // with tight jump timing right out of the gate. Markham (level 1) stays
-    // jump-only so first-time players learn one mechanic at a time.
-    const bannerChance = levelIndex >= 1 ? Math.min(0.22, 0.08 + levelIndex*0.03) : 0;
-    if(Math.random() < bannerChance){
-      spawnObstacleAt(LOGICAL_W + 20, 'banner');
-      showDuckTipIfNeeded();
-      return;
-    }
-
     // Clusters get more likely as levels climb, so the real challenge shifts
     // from "spot the obstacle" to "read the rhythm at speed." Capped at 2
     // obstacles per cluster — playtesting found 3 in a row unjumpable.
@@ -810,7 +757,21 @@
       x += w + 34*PORTRAIT_SCALE + Math.random()*22*PORTRAIT_SCALE;
     }
   }
+  const BOOST_CHANCE = 0.05; // rare — an earned charge, not something to lean on every run
   function spawnCollectible(){
+    // 'boost' (double-jump charge) is rare and rolled separately from the two
+    // product bottles, so it never displaces product-collection frequency —
+    // familiarizing players with the real products is still the main job of
+    // collectibles; boost is a bonus layer on top, not a replacement.
+    // Only one boost charge can be held at a time (no stacking), so skip the
+    // roll entirely if the player is already holding one — avoids spawning a
+    // pickup that would do nothing if grabbed.
+    if(!player.hasBoost && Math.random() < BOOST_CHANCE){
+      const w = 46, h = 46;
+      const hover = 55 + Math.random()*70;
+      collectibles.push({ type:'boost', x: LOGICAL_W + 20, y: groundY - h - hover, w, h, collected:false });
+      return;
+    }
     const t = Math.random() < 0.45 ? 'lemon' : 'cup';
     // Deliberately NOT scaled down with everything else above — bottle
     // legibility ("still too small to recognize the product") was hard-won
@@ -849,19 +810,13 @@
       }
       player.vy = 0;
       player.jumping = false;
+      player.midAirBoostUsed = false; // landed — a still-held boost charge can be used again next jump
       if(jumpBufferTimer > 0){ doJump(); } // buffered input fires the instant we're grounded
     }
     if(!player.jumping){ player.legPhase += 0.35 * dt; }
     if(jumpBufferTimer > 0) jumpBufferTimer -= dt;
     if(player.jumpPunch > 0) player.jumpPunch = Math.max(0, player.jumpPunch - 0.12*dt);
     if(player.landPunch > 0) player.landPunch = Math.max(0, player.landPunch - 0.08*dt);
-
-    // ducking — grounded only; holding the duck input mid-air does nothing
-    // until landing, since it's a crouch, not an air maneuver. duckAmount eases
-    // toward the target each frame for a quick-but-not-instant crouch in the render.
-    player.ducking = !player.jumping && duckHeld;
-    const duckTarget = player.ducking ? 1 : 0;
-    player.duckAmount += (duckTarget - player.duckAmount) * Math.min(1, 0.35*dt);
 
     // score / speed
     score += speed * 0.045 * dt;
@@ -890,33 +845,19 @@
       if(Math.random() < 0.55) spawnCollectible();
     }
 
-    // Collision hitbox is smaller than the rendered player while ducking — see
-    // PLAYER_DUCK_HITBOX_H above. player.w/h/y stay at full standing size for
-    // rendering (drawPlayer's squash transform handles the visual crouch), so
-    // this is the only place duck actually changes what can be hit.
-    const hitbox = player.ducking
-      ? { x:player.x, y:player.y+(player.h-PLAYER_DUCK_HITBOX_H), w:player.w, h:PLAYER_DUCK_HITBOX_H }
-      : player;
-
     // move + collide obstacles
     for(let i=obstacles.length-1;i>=0;i--){
       const o = obstacles[i];
       o.x -= speed * dt;
       if(o.x + o.w < 0){ obstacles.splice(i,1); continue; }
-      if(rectHit(hitbox, o)){
+      if(rectHit(player, o)){
         endGame();
         return;
       }
-      // Near-miss (ground obstacles, cleared while still airborne) / duck bonus
-      // (banners, cleared while ducking) — checked once, right as it passes.
+      // Near-miss bonus — cleared while still airborne — checked once, right as it passes.
       if(!o.bonusChecked && o.x + o.w < player.x){
         o.bonusChecked = true;
-        if(o.type === 'banner'){
-          if(player.ducking){
-            score += DUCK_BONUS;
-            popups.push({x:player.x+player.w/2, y:player.y-10, text:'Duck! +'+DUCK_BONUS, life:36, color: loc.accent});
-          }
-        } else if(player.jumping){
+        if(player.jumping){
           score += NEAR_MISS_BONUS;
           popups.push({x:player.x+player.w/2, y:player.y-10, text:'Close one! +'+NEAR_MISS_BONUS, life:36, color: loc.accent});
         }
@@ -927,11 +868,31 @@
       const c = collectibles[i];
       c.x -= speed * dt;
       if(c.x + c.w < 0){
-        if(!c.collected) collectStreak = 0; // scrolled off uncollected — streak resets
+        // 'boost' doesn't participate in the product-collection streak at all
+        // (missing one shouldn't break a streak built on the two real
+        // products, and it never built the streak either) — see spawnCollectible.
+        if(!c.collected && c.type !== 'boost'){
+          if(collectStreak >= 3){ // only worth calling out if a real streak was actually broken
+            popups.push({x:player.x+player.w/2, y:player.y-10, text:'Streak broken', life:34, color:'#3D3D3D'});
+          }
+          collectStreak = 0;
+        }
         collectibles.splice(i,1); continue;
       }
-      if(!c.collected && rectHit(hitbox, c)){
+      if(!c.collected && rectHit(player, c)){
         c.collected = true;
+        if(c.type === 'boost'){
+          player.hasBoost = true;
+          score += 15;
+          popups.push({x:c.x+c.w/2, y:c.y, text:'Boost Ready! +15', life:36, color:'#8C5A34'});
+          playTone(980, 0.1, 'triangle');
+          for(let p=0;p<8;p++){
+            particles.push({x:c.x+c.w/2, y:c.y+c.h/2, vx:(Math.random()-0.5)*4, vy:-Math.random()*3-1, life:24, color:'#8C5A34'});
+          }
+          updateHud();
+          collectibles.splice(i,1);
+          continue;
+        }
         collectStreak++;
         // Streak multiplier — up to 2.5x around a 15-streak. Collectibles are
         // the one thing in this game you can miss without dying, so they're
@@ -1502,13 +1463,8 @@
     const jumpLean = player.jumping ? Math.max(-0.18, Math.min(0.18, player.vy*0.012)) : 0;
     const stretch = player.jumpPunch * 0.16; // taller/thinner right at takeoff
     const squash = player.landPunch * 0.22;  // flatter/wider right on landing
-    // Duck crouch — reuses this same squash system (anchored at the feet via
-    // the translate below) rather than changing player.w/h, so the procedural
-    // art's fixed pixel offsets (face, straw, etc.) never go out of proportion.
-    // The actual smaller collision box while ducking lives in update()/hitbox.
-    const duckSquash = player.duckAmount * 0.42;
-    const scaleY = 1 - runSquash + stretch - squash - duckSquash;
-    const scaleX = 1 - stretch*0.6 + squash*0.6 + player.duckAmount*0.22;
+    const scaleY = 1 - runSquash + stretch - squash;
+    const scaleX = 1 - stretch*0.6 + squash*0.6;
 
     ctx.save();
     ctx.translate(x+w/2, y+h);
@@ -1623,37 +1579,6 @@
       ctx.textAlign = 'center';
       ctx.fillText('SOLD', o.x+o.w/2, o.y+9);
       ctx.fillText('OUT', o.x+o.w/2, o.y+17);
-    } else if(o.type === 'banner'){
-      // Hanging duck-only obstacle — a market awning/banner strung overhead.
-      // Explicit downward-arrow + "DUCK" label added directly on the obstacle
-      // (not just the tasseled trim) after testers couldn't tell what it was
-      // for — this spells the mechanic out instead of only implying it.
-      ctx.fillStyle = '#1A1A2E';
-      ctx.fillRect(o.x, o.y, o.w, o.h);
-      ctx.fillStyle = 'rgba(255,255,255,0.10)';
-      for(let s=0;s<4;s++){ ctx.fillRect(o.x+6+s*16, o.y, 8, o.h); }
-
-      const bottomY = o.y + o.h;
-      const cx = o.x + o.w/2;
-
-      ctx.fillStyle = '#E8C24A';
-      ctx.beginPath();
-      ctx.moveTo(cx-12, bottomY-46);
-      ctx.lineTo(cx+12, bottomY-46);
-      ctx.lineTo(cx, bottomY-30);
-      ctx.closePath();
-      ctx.fill();
-      ctx.fillStyle = '#FFFFFF';
-      ctx.font = 'bold 12px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.fillText('DUCK', cx, bottomY-14);
-
-      ctx.fillStyle = '#8C5A34';
-      ctx.fillRect(o.x, bottomY-6, o.w, 6);
-      for(let t=0;t<5;t++){
-        const tx = o.x + 6 + t*(o.w-12)/4;
-        ctx.fillRect(tx-1.5, bottomY, 3, 10);
-      }
     }
   }
 
@@ -1662,7 +1587,35 @@
       ctx.drawImage(SPRITES[c.type], c.x, c.y, c.w, c.h);
       return;
     }
+    if(c.type === 'boost'){ drawBoostIcon(c.x, c.y, c.w, c.h); return; }
     drawBottle(c.x, c.y, c.w, c.h, c.type);
+  }
+
+  // Double-jump power-up icon — deliberately NOT a third product bottle (only
+  // the two real Old Kennedy drinks should ever look like drinks) and
+  // deliberately NOT gold (ruled out for this game's palette elsewhere) — a
+  // navy bubble with a white lightning bolt and the tea-brown functional
+  // accent as a glow ring, so it reads as "brand-consistent bonus," not a
+  // third flavor.
+  function drawBoostIcon(x, y, w, h){
+    const cx = x+w/2, cy = y+h/2, r = w/2;
+    ctx.save();
+    ctx.fillStyle = 'rgba(140,90,52,0.28)'; // soft tea-brown glow ring
+    ctx.beginPath(); ctx.arc(cx, cy, r*1.18, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#1A1A2E';
+    ctx.strokeStyle = '#FFFFFF'; ctx.lineWidth = 2.4;
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#FFFFFF';
+    ctx.beginPath();
+    ctx.moveTo(cx-r*0.12, cy-r*0.55);
+    ctx.lineTo(cx-r*0.42, cy+r*0.08);
+    ctx.lineTo(cx-r*0.06, cy+r*0.08);
+    ctx.lineTo(cx-r*0.28, cy+r*0.6);
+    ctx.lineTo(cx+r*0.44, cy-r*0.12);
+    ctx.lineTo(cx+r*0.06, cy-r*0.12);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
   }
 
   // A single bottle silhouette shared by both drinks so they read as one product
