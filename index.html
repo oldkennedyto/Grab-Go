@@ -23,6 +23,20 @@
     color:var(--navy);
     -webkit-tap-highlight-color: transparent;
     overscroll-behavior:none;
+    /* Tapping/holding to jump was triggering iOS Safari's native text-selection
+       highlight and long-press "Copy / Search with Google" callout menu across
+       the whole page — this is a fast-tap game, not selectable text, so both
+       are disabled here. touch-action:manipulation also stops double-tap zoom
+       from interfering with rapid tapping. */
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none;
+    touch-action: manipulation;
+  }
+  /* ...except the actual name-entry field, which still needs normal text
+     selection/editing behavior for typing a nickname. */
+  input{
+    -webkit-user-select: text; user-select: text;
+    -webkit-touch-callout: default;
   }
   .app{
     max-width: 720px;
@@ -47,14 +61,31 @@
   .brandbar .logo{
     height: 90px; width: auto; display: block;
   }
+  /* On short landscape phone viewports, the full-size header/logo eats a big
+     chunk of the limited vertical space, leaving less room for the game
+     itself even once it's correctly centered. Shrinking it here means
+     fitStage()'s available-height measurement (which reads the header's
+     actual rendered height) automatically gets more room to work with. */
+  @media (orientation: landscape) and (max-height: 500px){
+    .app{ padding-top: 8px; padding-bottom: 10px; }
+    .brandbar{ padding-bottom: 4px; margin-bottom: 8px; }
+    .brandbar .logo{ height: 40px; }
+    .brandbar .mark{ font-size: 17px; }
+  }
   .stage{
     /* width is 100% as a fallback for the very first paint before JS runs;
        fitStage() (see script) overrides this with an explicit pixel width
        every load/resize/orientation change, picking whichever of available
        width or available height is the tighter constraint, so the game is
-       always as large as it can be regardless of phone orientation. */
+       always as large as it can be regardless of phone orientation.
+       margin:0 auto is required now that width can be smaller than the
+       container (the height-constrained/landscape case) — without it the
+       block element just sticks to the left edge instead of centering,
+       which is exactly the "stuck small in the corner" bug reported after
+       testing on a real phone in landscape. */
     position: relative;
     width: 100%;
+    margin: 0 auto;
     aspect-ratio: 5 / 3;
     border-radius: 14px;
     overflow: hidden;
@@ -123,6 +154,22 @@
     letter-spacing:1px; margin-top:3px;
   }
   .locbanner.show{ transform: translate(-50%, 0); opacity: 1; }
+  .countdown{
+    position:absolute; inset:0; display:none;
+    align-items:center; justify-content:center;
+    font-family:'Baloo 2', sans-serif; font-weight:800; color: var(--white);
+    font-size: 96px; text-shadow: 0 4px 14px rgba(0,0,0,0.45);
+    pointer-events:none; /* purely visual — never blocks jump input underneath */
+    z-index: 5;
+  }
+  .countdown.show{ display:flex; }
+  @keyframes countdownPulse{
+    0%{ transform:scale(0.4); opacity:0; }
+    30%{ transform:scale(1.15); opacity:1; }
+    60%{ transform:scale(1); opacity:1; }
+    100%{ transform:scale(1); opacity:0; }
+  }
+  .countdown.pulse{ animation: countdownPulse 0.6s ease-out; }
   .overlay{
     position:absolute; inset:0;
     background: rgba(250,250,248,0.96);
@@ -215,6 +262,7 @@
       </div>
     </div>
     <div class="locbanner" id="locBanner"><span id="locName"></span><span class="sub" id="locSub"></span></div>
+    <div class="countdown" id="countdown"></div>
 
     <div class="overlay" id="startOverlay">
       <h2>Grab &amp; Go</h2>
@@ -388,7 +436,7 @@
   }
 
   // ---------- Game state ----------
-  let state = 'ready'; // ready | playing | over
+  let state = 'ready'; // ready | countdown | playing | over
   // Personal best score persists across reloads/redeploys via localStorage —
   // it's per-browser/per-device (not shared across players), which is fine for
   // now since there's no giveaway leaderboard yet; see notes near endGame().
@@ -528,7 +576,34 @@
     document.getElementById('startOverlay').style.display = 'none';
     document.getElementById('overOverlay').style.display = 'none';
     resetGame();
-    state = 'playing';
+    runCountdown();
+  }
+
+  // "3.. 2.. 1.. Go!" beat before play actually begins, per tester feedback.
+  // State is set to 'countdown' (not 'playing') for its duration, so update()
+  // never runs — obstacles/collectibles/parallax all stay frozen on the
+  // freshly-reset scene until it finishes, then flips to 'playing'. Purely a
+  // setTimeout-driven UI sequence since it's not part of the physics loop.
+  function runCountdown(){
+    state = 'countdown';
+    const el = document.getElementById('countdown');
+    const steps = ['3','2','1','Go!'];
+    let i = 0;
+    el.classList.add('show');
+    (function showNext(){
+      if(i >= steps.length){
+        el.classList.remove('show','pulse');
+        state = 'playing';
+        return;
+      }
+      el.textContent = steps[i];
+      el.classList.remove('pulse');
+      void el.offsetWidth; // force reflow so the pulse animation restarts each tick
+      el.classList.add('pulse');
+      playTone(i < steps.length-1 ? 520 : 780, 0.09, 'square');
+      i++;
+      setTimeout(showNext, 550);
+    })();
   }
 
   // ---------- Spawning ----------
