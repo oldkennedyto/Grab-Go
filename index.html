@@ -93,6 +93,13 @@
     box-shadow: 0 6px 0 var(--navy);
     background: linear-gradient(#DCE9F2, #F3EFE6);
   }
+  /* Fullscreen: JS (fitStage) still computes the exact centered pixel width
+     to preserve the game's aspect ratio, so this just drops the card chrome
+     (border/radius/shadow) for an edge-to-edge feel; any letterbox space is
+     plain white via html/body's background, matching the brand's white rule. */
+  .stage:fullscreen, .stage:-webkit-full-screen, .stage:-ms-fullscreen{
+    border-radius:0; border:none; box-shadow:none; margin:0 auto;
+  }
   canvas{
     display:block; width:100%; height:100%;
   }
@@ -273,7 +280,10 @@
     <div class="hud">
       <div class="score" id="scoreLabel">0</div>
       <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;pointer-events:auto;">
-        <button id="muteBtn" style="border:2px solid var(--navy);background:var(--white);border-radius:8px;padding:1px 8px;font-size:13px;cursor:pointer;line-height:1.5;">🔊</button>
+        <div style="display:flex;gap:4px;">
+          <button id="fsBtn" aria-label="Fullscreen" style="border:2px solid var(--navy);background:var(--white);border-radius:8px;padding:1px 8px;font-size:13px;cursor:pointer;line-height:1.5;">⛶</button>
+          <button id="muteBtn" style="border:2px solid var(--navy);background:var(--white);border-radius:8px;padding:1px 8px;font-size:13px;cursor:pointer;line-height:1.5;">🔊</button>
+        </div>
         <div class="best" id="bestLabel"></div>
       </div>
     </div>
@@ -348,10 +358,24 @@
   // the old width-only sizing could make the stage taller than the visible
   // viewport. On desktop this reproduces the same size the old width:100%
   // rule gave, since width is virtually always the binding constraint there.
+  function isStageFullscreen(){
+    const fsEl = document.fullscreenElement || document.webkitFullscreenElement || document.msFullscreenElement;
+    return fsEl === stage;
+  }
+
   function fitStage(){
-    const availWidth = Math.min(document.body.clientWidth, APP_MAX_WIDTH) - APP_PAD_H;
-    const stageTop = stage.getBoundingClientRect().top;
-    const availHeight = window.innerHeight - stageTop - STAGE_BOTTOM_MARGIN;
+    // In fullscreen, .stage IS the whole screen (no .app max-width/padding,
+    // no header eating vertical space above it), so size against the full
+    // window instead of the constrained in-page layout.
+    let availWidth, availHeight;
+    if(isStageFullscreen()){
+      availWidth = window.innerWidth;
+      availHeight = window.innerHeight;
+    } else {
+      availWidth = Math.min(document.body.clientWidth, APP_MAX_WIDTH) - APP_PAD_H;
+      const stageTop = stage.getBoundingClientRect().top;
+      availHeight = window.innerHeight - stageTop - STAGE_BOTTOM_MARGIN;
+    }
     const widthFromHeight = availHeight * ASPECT;
     const targetWidth = Math.max(240, Math.min(availWidth, widthFromHeight));
     stage.style.width = targetWidth + 'px';
@@ -370,6 +394,43 @@
   // iOS Safari sometimes reports stale viewport dimensions right at the
   // orientationchange event; re-fitting a beat later catches up.
   window.addEventListener('orientationchange', () => setTimeout(fitCanvas, 100));
+
+  // ---------- Fullscreen ----------
+  // .stage (not the whole page) is the element that goes fullscreen, so the
+  // brandbar/header simply isn't part of what's shown — more room for the
+  // game itself. Vendor-prefixed fallbacks cover older WebKit/Edge; iOS
+  // Safari on iPhone has no support at all for fullscreening an arbitrary
+  // element (only <video>), so the button is hidden there via the
+  // supportsFullscreen() feature-detect below rather than shown broken.
+  function supportsFullscreen(){
+    return !!(stage.requestFullscreen || stage.webkitRequestFullscreen || stage.msRequestFullscreen);
+  }
+  function requestFs(el){
+    const fn = el.requestFullscreen || el.webkitRequestFullscreen || el.msRequestFullscreen;
+    return fn && fn.call(el);
+  }
+  function exitFs(){
+    const fn = document.exitFullscreen || document.webkitExitFullscreen || document.msExitFullscreen;
+    return fn && fn.call(document);
+  }
+  function toggleFullscreen(){
+    if(isStageFullscreen()) exitFs();
+    else requestFs(stage);
+  }
+  function onFullscreenChange(){
+    const btn = document.getElementById('fsBtn');
+    if(btn) btn.textContent = isStageFullscreen() ? '⤡' : '⛶';
+    // Dimensions change the instant fullscreen toggles; re-fit right away.
+    fitCanvas();
+  }
+  ['fullscreenchange','webkitfullscreenchange','msfullscreenchange'].forEach(ev =>
+    document.addEventListener(ev, onFullscreenChange));
+  const fsBtn = document.getElementById('fsBtn');
+  if(supportsFullscreen()){
+    fsBtn.addEventListener('click', toggleFullscreen);
+  } else {
+    fsBtn.style.display = 'none';
+  }
 
 
   // ---------- Locations ----------
