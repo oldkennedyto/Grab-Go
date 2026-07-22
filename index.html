@@ -272,7 +272,7 @@
     <div class="hud">
       <div>
         <div class="score" id="scoreLabel">0</div>
-        <div class="boostBadge" id="boostBadge">⚡ Double Jump Ready</div>
+        <div class="boostBadge" id="boostBadge">⚡ Double Jump Ready; reach high!</div>
         <div class="streakBadge" id="streakBadge"></div>
       </div>
       <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;pointer-events:auto;">
@@ -383,10 +383,46 @@
     canvas.style.width = rect.width + 'px';
     canvas.style.height = rect.height + 'px';
     ctx.setTransform(dpr,0,0,dpr,0,0);
+    lastFitWidth = document.body.clientWidth;
+    lastFitHeight = window.innerHeight;
   }
-  window.addEventListener('resize', fitCanvas);
+
+  // Tester feedback (2026-07-21): the game "sometimes shrinks or enlarges"
+  // mid-play on phone. Root cause: mobile browsers collapse/expand their
+  // address bar and bottom toolbar in response to scrolling (even a tiny
+  // incidental scroll, e.g. from a mistimed tap near the edge of the stage,
+  // or the page settling right after load); that changes window.innerHeight
+  // and fires a real 'resize' event, which fitCanvas() then faithfully acted
+  // on every time, visibly resizing the whole game. A genuine orientation
+  // change or desktop window resize always changes width too; a chrome
+  // toggle only ever changes height, and only by roughly a toolbar's worth
+  // of pixels. So resize events that keep the same width and shift height by
+  // less than CHROME_NOISE_PX are treated as chrome noise and ignored; the
+  // stage stays put through those, trading a small amount of unused vertical
+  // space for a stable frame, which is the actual ask here. Everything else
+  // (real rotation, real resize, fullscreen toggle) still refits normally.
+  let lastFitWidth = null, lastFitHeight = null;
+  const CHROME_NOISE_PX = 120;
+  let resizeSettleTimer = null;
+  function handleResize(){
+    clearTimeout(resizeSettleTimer);
+    // Also debounced: iOS in particular can fire several resize events in a
+    // burst while the chrome animates in/out, so waiting for it to settle
+    // avoids refitting mid-animation even for changes that pass the filter.
+    resizeSettleTimer = setTimeout(()=>{
+      if(isStageFullscreen()){ fitCanvas(); return; }
+      const w = document.body.clientWidth, h = window.innerHeight;
+      if(lastFitWidth !== null && w === lastFitWidth && Math.abs(h - lastFitHeight) < CHROME_NOISE_PX){
+        return; // same width, small height shift; browser chrome, not a real resize
+      }
+      fitCanvas();
+    }, 150);
+  }
+  window.addEventListener('resize', handleResize);
   // iOS Safari sometimes reports stale viewport dimensions right at the
-  // orientationchange event; re-fitting a beat later catches up.
+  // orientationchange event; re-fitting a beat later catches up. Orientation
+  // change is a deliberate device rotation (width/height swap), so it always
+  // refits directly rather than going through the chrome-noise filter above.
   window.addEventListener('orientationchange', () => setTimeout(fitCanvas, 100));
 
   // ---------- Fullscreen ----------
@@ -430,6 +466,7 @@
   // ---------- Locations ----------
   const LOCATIONS = [
     { key:'markham', name:'Markham, ON', sub:'HOME BASE', sky:['#DCE9F2','#F3EFE6'], ground:'#D8D2C4', accent:'#8C5A34', mood:'day' },
+    { key:'tst', name:'Tsim Sha Tsui', sub:'尖沙咀 · THE CLOCK TOWER', sky:['#5FA8D3','#BEE3F5'], ground:'#C9C2B4', accent:'#B2704A', mood:'day' },
     { key:'templeSt', name:'Temple Street', sub:'夜市 · NIGHT MARKET', sky:['#242047','#4E3B66'], ground:'#2A2438', accent:'#D5502F', mood:'night' },
     { key:'mongkok', name:'Mong Kok', sub:'旺角', sky:['#181A33','#3B2A4E'], ground:'#1E1A2A', accent:'#E0507A', mood:'night' },
     { key:'samshuipo', name:'Sham Shui Po', sub:'深水埗', sky:['#E9DBC0','#F3EFE6'], ground:'#C9BFA0', accent:'#8C5A34', mood:'day' },
@@ -635,8 +672,17 @@
   // one extra mid-air jump. Deliberately still just a tap: it fires from the
   // exact same tryJump() input as a normal jump, triggered only by context
   // (already airborne + holding a charge), so it never becomes a second
-  // control players have to learn or manage — same lesson learned from
+  // control players have to learn or manage, same lesson learned from
   // removing the duck button.
+  //
+  // 2026-07-21 pivot: a single jump already clears every obstacle/cluster the
+  // game spawns, so double jump was never actually needed for survival; its
+  // real job now is reaching the high-placed 'prize' bottles that spawn once
+  // a charge is held (see spawnCollectible/PRIZE_CHANCE), i.e. it's a
+  // collecting/scoring tool, not obstacle insurance. Chaining it near the
+  // apex of the first jump (rather than immediately after taking off) yields
+  // noticeably more total height, which is what makes reaching a prize a
+  // real timing skill rather than automatic.
   function doDoubleJump(){
     player.vy = JUMP_V * 0.92; // very slightly gentler than the first jump so it doesn't feel identical/overpowered
     player.jumpPunch = 1;
@@ -758,6 +804,14 @@
     }
   }
   const BOOST_CHANCE = 0.05; // rare — an earned charge, not something to lean on every run
+  // Prize bottles are the double jump's real purpose, per the 2026-07-21
+  // pivot away from "obstacle insurance" and toward collecting/points. Once a
+  // charge is held, there's a good chance the next bottle spawns well above
+  // single-jump reach (hover 175-215 vs. the normal 55-125 band) with a
+  // score multiplier — the double jump becomes "the tool that gets you the
+  // big one," not a survival crutch for an obstacle set that never needed it.
+  const PRIZE_CHANCE = 0.5;   // rolled only while a boost charge is held
+  const PRIZE_MULT = 2.5;
   function spawnCollectible(){
     // 'boost' (double-jump charge) is rare and rolled separately from the two
     // product bottles, so it never displaces product-collection frequency —
@@ -779,8 +833,9 @@
     // narrower portrait canvas would undo that; if anything it now reads as
     // proportionally larger relative to the narrower screen, which is fine.
     const w = 90, h = 104;
-    const hover = 55 + Math.random()*70;
-    collectibles.push({ type:t, x: LOGICAL_W + 20, y: groundY - h - hover, w, h, collected:false });
+    const prize = player.hasBoost && Math.random() < PRIZE_CHANCE;
+    const hover = prize ? (175 + Math.random()*40) : (55 + Math.random()*70);
+    collectibles.push({ type:t, x: LOGICAL_W + 20, y: groundY - h - hover, w, h, collected:false, prize });
   }
 
   // ---------- Update ----------
@@ -871,7 +926,11 @@
         // 'boost' doesn't participate in the product-collection streak at all
         // (missing one shouldn't break a streak built on the two real
         // products, and it never built the streak either) — see spawnCollectible.
-        if(!c.collected && c.type !== 'boost'){
+        // Prize bottles are the same: they're a bonus opportunity gated
+        // behind holding a charge, not a required pickup, so whiffing one
+        // (didn't get the timing right, or the boost simply wasn't spent in
+        // time) costs you the prize itself but never your existing streak.
+        if(!c.collected && c.type !== 'boost' && !c.prize){
           if(collectStreak >= 3){ // only worth calling out if a real streak was actually broken
             popups.push({x:player.x+player.w/2, y:player.y-10, text:'Streak broken', life:34, color:'#3D3D3D'});
           }
@@ -897,15 +956,19 @@
         // Streak multiplier — up to 2.5x around a 15-streak. Collectibles are
         // the one thing in this game you can miss without dying, so they're
         // the natural risk/reward lever (see collectStreak comment above).
+        // Prize multiplier stacks on top — a well-timed high grab during a
+        // long streak is meant to feel like the biggest score moment in the
+        // game, reinforcing that collecting, not obstacle-dodging, is where
+        // the real points are.
         const streakMult = 1 + Math.min(1.5, (collectStreak-1)*0.1);
         const base = (c.type==='lemon' ? 40 : 25);
-        const gain = Math.round(base * streakMult);
+        const gain = Math.round(base * streakMult * (c.prize ? PRIZE_MULT : 1));
         score += gain;
-        const label = collectStreak >= 3 ? ('+'+gain+' (x'+collectStreak+'!)') : ('+'+gain);
-        popups.push({x:c.x+c.w/2, y:c.y, text:label, life:36, color: loc.accent});
-        playTone(c.type==='lemon' ? 880 : 740, 0.08, 'sine');
-        for(let p=0;p<8;p++){
-          particles.push({x:c.x+c.w/2, y:c.y+c.h/2, vx:(Math.random()-0.5)*4, vy:-Math.random()*3-1, life:24, color: loc.accent});
+        const label = c.prize ? ('+'+gain+' Prize!') : (collectStreak >= 3 ? ('+'+gain+' (x'+collectStreak+'!)') : ('+'+gain));
+        popups.push({x:c.x+c.w/2, y:c.y, text:label, life: c.prize ? 46 : 36, color: c.prize ? '#8C5A34' : loc.accent});
+        playTone(c.prize ? 1040 : (c.type==='lemon' ? 880 : 740), c.prize ? 0.12 : 0.08, c.prize ? 'triangle' : 'sine');
+        for(let p=0;p<(c.prize ? 16 : 8);p++){
+          particles.push({x:c.x+c.w/2, y:c.y+c.h/2, vx:(Math.random()-0.5)*(c.prize?6:4), vy:-Math.random()*3-1, life:24, color: c.prize ? '#8C5A34' : loc.accent});
         }
         collectibles.splice(i,1);
       }
@@ -961,7 +1024,7 @@
       drawClouds();
     }
 
-    const scenes = { markham: sceneMarkham, templeSt: sceneTempleStreet, mongkok: sceneMongKok, samshuipo: sceneShamShuiPo, yaumatei: sceneYauMaTei, cheungchau: sceneCheungChau };
+    const scenes = { markham: sceneMarkham, tst: sceneTsimShaTsui, templeSt: sceneTempleStreet, mongkok: sceneMongKok, samshuipo: sceneShamShuiPo, yaumatei: sceneYauMaTei, cheungchau: sceneCheungChau };
     (scenes[loc.key] || sceneMarkham)(loc);
 
     // ground
@@ -1061,20 +1124,99 @@
       ctx.fillRect(bx, groundY-58, 72, 8);
     }
 
-    // Clock tower + maple pole are singular (one instance, not a repeating
-    // tile), so unlike the buildings above they deliberately do NOT use a
-    // wrapping parallaxOffset — a modulo'd position only looks seamless for
-    // something that repeats. Instead they drift continuously off frame*mult
-    // with no wrap at all, so they cross the screen once per level and simply
-    // scroll off for good, instead of snapping back into view mid-level (the
-    // "glitch" that was reported). Made taller (150→260) to hold its own in
-    // the much taller portrait frame.
-    const towerX = 204 - frame*0.2;
-    ctx.fillStyle = '#D9D2C1';
-    ctx.fillRect(towerX, groundY-260, 28, 260);
-    ctx.fillStyle = '#1A1A2E';
-    ctx.lineWidth=2; ctx.strokeStyle='#1A1A2E';
-    ctx.beginPath(); ctx.arc(towerX+14, groundY-230, 12, 0, Math.PI*2); ctx.stroke();
+    // Markham Civic Centre + maple pole are singular (one instance, not a
+    // repeating tile), so unlike the buildings above they deliberately do NOT
+    // use a wrapping parallaxOffset — a modulo'd position only looks seamless
+    // for something that repeats. Instead they drift continuously off
+    // frame*mult with no wrap at all, so they cross the screen once per level
+    // and simply scroll off for good, instead of snapping back into view
+    // mid-level (the "glitch" that was reported).
+    //
+    // 2026-07-21: replaced an invented generic clock tower with the real
+    // Markham Civic Centre, after the user shared reference photos and asked
+    // specifically for it — a wide, shallow-domed rotunda in patinated
+    // copper-green over salmon-pink brick, resting on a colonnade of white
+    // columns right at the water's edge, with a taller slit-windowed block
+    // and a small secondary turret beside it. Unlike the gate/lighthouse/
+    // tower elsewhere (tall, narrow landmarks), this one's real identity is
+    // its width and shallow dome, so it's built wide and low on purpose
+    // rather than reaching for height.
+    const civicX = 130 - frame*0.15;
+    const civicW = 200;
+    const colH = 50, drumH = 90, bandH = 12, domeRise = 55;
+    const colTop = groundY - colH;
+    const drumTop = colTop - drumH;
+    const bandTop = drumTop - bandH;
+    const domeBaseY = bandTop;
+    const domeApexY = domeBaseY - domeRise;
+
+    // small secondary turret, drawn first so only its rounded cap peeks out
+    // above the block/rotunda drawn on top of it below
+    const turX = civicX - 14, turW = 22, turTop = drumTop - 18, turH = 90;
+    ctx.fillStyle = '#CC9580';
+    ctx.fillRect(turX, turTop, turW, turH);
+    ctx.fillStyle = '#EAE4D6';
+    ctx.beginPath(); ctx.ellipse(turX+turW/2, turTop, turW/2, 8, 0, Math.PI, Math.PI*2); ctx.fill();
+
+    // taller slit-window block beside the rotunda
+    const blockW = 70, blockH = 170, blockX = civicX - blockW - 6;
+    ctx.fillStyle = '#CC9580';
+    ctx.fillRect(blockX, groundY-blockH, blockW, blockH);
+    ctx.fillStyle = '#EAE4D6';
+    ctx.fillRect(blockX, groundY-blockH, blockW, 10);
+    ctx.fillStyle = 'rgba(26,26,46,0.35)';
+    for(let r=0;r<5;r++){
+      for(let c=0;c<3;c++){ ctx.fillRect(blockX+10+c*18, groundY-blockH+24+r*26, 8, 18); }
+    }
+    ctx.fillStyle = 'rgba(26,26,46,0.4)';
+    ctx.fillRect(blockX+20, groundY-blockH-10, 24, 10); // rooftop mechanical unit
+
+    // colonnade — thin white columns over tinted glass, right at the water
+    // line. Originally near-black (#2A2438); this band sits exactly where
+    // the player and ground obstacles visually sit (its bottom edge lines up
+    // with groundY), so a near-black fill here was camouflaging dark game
+    // elements against it. Lightened to a mid-tone steel-blue glass instead
+    // — still reads as tinted glass in shadow under the colonnade, but is
+    // light enough to not swallow dark objects while staying dark enough
+    // that the near-white ice cube obstacles don't wash out against it either.
+    ctx.fillStyle = '#7C93A0';
+    ctx.fillRect(civicX, colTop, civicW, colH);
+    ctx.fillStyle = '#EAE4D6';
+    const colCount = 9;
+    for(let c=0;c<colCount;c++){
+      const cx = civicX + (civicW/(colCount-1))*c;
+      ctx.fillRect(cx-3, colTop, 6, colH);
+    }
+
+    // salmon-pink brick drum
+    ctx.fillStyle = '#CC9580';
+    ctx.fillRect(civicX, drumTop, civicW, drumH);
+
+    // cream stone band
+    ctx.fillStyle = '#EAE4D6';
+    ctx.fillRect(civicX, bandTop, civicW, bandH);
+
+    // shallow ribbed dome roof, patinated copper-green — clipped to its own
+    // silhouette so the ribbing never draws outside the curved roofline
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(civicX-10, domeBaseY);
+    ctx.quadraticCurveTo(civicX+civicW/2, domeApexY, civicX+civicW+10, domeBaseY);
+    ctx.closePath();
+    ctx.fillStyle = '#5B8C7E';
+    ctx.fill();
+    ctx.clip();
+    ctx.strokeStyle = 'rgba(26,26,46,0.25)'; ctx.lineWidth = 1.5;
+    const ribCount = 8;
+    for(let r=1;r<ribCount;r++){
+      const t = r/ribCount;
+      const rx = civicX-10 + (civicW+20)*t;
+      ctx.beginPath(); ctx.moveTo(rx, domeBaseY+4); ctx.lineTo(civicX+civicW/2, domeApexY-4); ctx.stroke();
+    }
+    ctx.restore();
+    ctx.strokeStyle = '#1A1A2E'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(civicX-10, domeBaseY); ctx.lineTo(civicX+civicW+10, domeBaseY); ctx.stroke();
+
     // small maple leaf marker on a pole
     const px = 372 - frame*0.3;
     ctx.strokeStyle = '#8C8C96'; ctx.lineWidth=3;
@@ -1088,6 +1230,112 @@
     ctx.lineTo(px-2, groundY-80); ctx.lineTo(px-10, groundY-80);
     ctx.lineTo(px-2, groundY-88); ctx.lineTo(px-8, groundY-88);
     ctx.closePath(); ctx.fill();
+  }
+
+  // Tsim Sha Tsui (2026-07-21): new 7th level, inserted right after Markham
+  // per the user's requested order. Built from reference photos of the real
+  // harbourfront: the Clock Tower (former KCR railway clock tower, a tiered
+  // red-brick shaft with a white domed cupola and spire) is the level's hero
+  // landmark, with the Hong Kong Cultural Centre's distinctive windowless,
+  // angular sloped-roof silhouette beside it, palm trees lining the
+  // promenade (a fresh visual signature — every other level so far is brick/
+  // neon/laundry, this is the first tropical-waterfront one), and a hazy
+  // distant Hong Kong Island skyline across the harbor. Per the lesson from
+  // Cheung Chau's boats, the richer detail (tower, skyline, harbor band)
+  // stays higher in the frame; only the palms come down near the promenade,
+  // and even those are thin/sparse rather than a solid mass, so they don't
+  // compete with obstacle/collectible legibility near the ground.
+  function sceneTsimShaTsui(loc){
+    const skylineOff = parallaxOffset(0.2, 60);
+    const palmOff = parallaxOffset(0.5, 70);
+
+    // distant Hong Kong Island skyline across the harbor — hazy/light so it
+    // reads as far away, with one taller spike (echoing IFC) breaking the line
+    ctx.fillStyle = 'rgba(140,165,185,0.5)';
+    for(let i=-1;i<10;i++){
+      const bx = i*60 - skylineOff;
+      const h = (i%3===0) ? 150 : 90 + (i%4)*14;
+      ctx.fillRect(bx, groundY-220-h, 30, h);
+    }
+
+    // harbor water band between the distant skyline and the promenade
+    ctx.fillStyle = 'rgba(46,110,122,0.35)';
+    ctx.fillRect(0, groundY-220, LOGICAL_W, 70);
+
+    // Clock Tower — singular hero landmark, drifts continuously off
+    // frame*mult with no wrap like the other levels' hero shapes. Stepped/
+    // tiered brick shaft (matching the real tower's setback profile) rather
+    // than a single straight rectangle, topped with a clock face, a white
+    // drum, a domed cupola, and a spire.
+    const towerX = 130 - frame*0.15;
+    const baseW=58, baseH=80, midW=48, midH=70, upperW=40, upperH=100;
+    const baseTop = groundY-baseH, midTop = baseTop-midH, upperTop = midTop-upperH;
+    ctx.fillStyle = '#B2704A';
+    ctx.fillRect(towerX-baseW/2, baseTop, baseW, baseH);
+    ctx.fillRect(towerX-midW/2, midTop, midW, midH);
+    ctx.fillRect(towerX-upperW/2, upperTop, upperW, upperH);
+    ctx.fillStyle = '#EAE0C8'; // cream stone setback bands between tiers
+    ctx.fillRect(towerX-baseW/2, baseTop, baseW, 6);
+    ctx.fillRect(towerX-midW/2, midTop, midW, 6);
+    // arched window openings, dark, on the base/mid tiers
+    ctx.fillStyle = 'rgba(26,26,46,0.55)';
+    ctx.fillRect(towerX-10, baseTop+18, 20, 34);
+    ctx.fillRect(towerX-8, midTop+14, 16, 28);
+    // clock face
+    ctx.fillStyle = '#F3EFE6';
+    ctx.beginPath(); ctx.arc(towerX, upperTop+32, 13, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = '#1A1A2E'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(towerX, upperTop+32, 13, 0, Math.PI*2); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(towerX, upperTop+32); ctx.lineTo(towerX, upperTop+23); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(towerX, upperTop+32); ctx.lineTo(towerX+7, upperTop+32); ctx.stroke();
+    // white drum + domed cupola
+    const drumTop = upperTop-20;
+    ctx.fillStyle = '#F3EFE6';
+    ctx.fillRect(towerX-15, drumTop, 30, 20);
+    ctx.beginPath();
+    ctx.moveTo(towerX-15, drumTop);
+    ctx.quadraticCurveTo(towerX, drumTop-40, towerX+15, drumTop);
+    ctx.closePath();
+    ctx.fill();
+    // spire + finial
+    ctx.strokeStyle = '#8C8C7A'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(towerX, drumTop-40); ctx.lineTo(towerX, drumTop-68); ctx.stroke();
+    ctx.fillStyle = '#8C8C7A';
+    ctx.beginPath(); ctx.arc(towerX, drumTop-70, 3, 0, Math.PI*2); ctx.fill();
+
+    // Hong Kong Cultural Centre — angular, deliberately windowless sloped
+    // roofline right beside the tower, per the reference photos' most
+    // distinctive secondary shape.
+    const ccX = towerX + baseW/2 + 24, ccW = 150, ccBaseH = 140;
+    ctx.fillStyle = '#D9C9BC';
+    ctx.beginPath();
+    ctx.moveTo(ccX, groundY);
+    ctx.lineTo(ccX, groundY-ccBaseH*0.5);
+    ctx.lineTo(ccX+40, groundY-ccBaseH);
+    ctx.lineTo(ccX+ccW, groundY-ccBaseH*0.65);
+    ctx.lineTo(ccX+ccW, groundY);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = 'rgba(140,180,190,0.5)';
+    ctx.fillRect(ccX+38, groundY-ccBaseH*0.9, 4, ccBaseH*0.75);
+
+    // palm trees along the promenade — thin/sparse on purpose (see comment
+    // above the function) so they read as texture without competing with
+    // obstacles/collectibles for visibility near the ground.
+    ctx.lineCap = 'round';
+    for(let i=-1;i<8;i++){
+      const px = i*70 - palmOff + 30;
+      ctx.strokeStyle = '#8C5A34'; ctx.lineWidth = 5;
+      ctx.beginPath(); ctx.moveTo(px, groundY); ctx.quadraticCurveTo(px+6, groundY-70, px+2, groundY-125); ctx.stroke();
+      ctx.fillStyle = '#3E7A5E';
+      for(let f=0;f<6;f++){
+        const ang = (f/6)*Math.PI*2;
+        ctx.beginPath();
+        ctx.ellipse(px+2+Math.cos(ang)*14, groundY-125+Math.sin(ang)*7, 15, 5, ang, 0, Math.PI*2);
+        ctx.fill();
+      }
+    }
+    ctx.lineCap = 'butt';
   }
 
   // Temple Street: night market, signature element is the red ceremonial gate
@@ -1107,8 +1355,19 @@
     // that repeats, otherwise it snaps back into view mid-level.
     const gx = 240 - frame*0.15;
 
-    // warm ambient glow pooling behind the gate
-    const glow = ctx.createRadialGradient(gx, groundY-260, 20, gx, groundY-260, 300);
+    // 2026-07-21 proportion redesign: the original portrait fix kept the
+    // gate's width at 132 (the 0.6x PORTRAIT_SCALE value) but stretched its
+    // height from 260 to 400 to fill the taller sky, turning a wide archway
+    // into a tall thin sliver (the tester-reported "can't even see Temple
+    // Street" case). Real paifang gates are wide relative to their height;
+    // rebuilt at gateW=210 (was 132) with shorter columns so the silhouette
+    // reads as an archway again, and repositioned so its base meets the
+    // street instead of floating in a large gap of empty sky above it.
+    const gateW = 210, colHeight = 230;
+    const gateTop = groundY - 40 - colHeight; // columns run from gateTop+40 to groundY
+
+    // warm ambient glow pooling behind the gate, centered on its roof/crossbeam
+    const glow = ctx.createRadialGradient(gx, gateTop+60, 20, gx, gateTop+60, 300);
     glow.addColorStop(0, 'rgba(213,80,47,0.28)');
     glow.addColorStop(1, 'rgba(213,80,47,0)');
     ctx.fillStyle = glow;
@@ -1142,16 +1401,15 @@
     }
     ctx.shadowBlur = 0;
 
-    // the Temple Street gate (paifang) — taller (260→400) to hold its own in
-    // the bigger frame; width rescaled by PORTRAIT_SCALE
-    const gateW = 132, gateTop = groundY-400;
+    // the Temple Street gate (paifang) — see the proportion-redesign comment
+    // above for gateW/gateTop/colHeight
     ctx.shadowColor = 'rgba(0,0,0,0.4)';
     ctx.shadowBlur = 6;
 
     // columns
     ctx.fillStyle = '#B23A2E';
-    ctx.fillRect(gx - gateW/2, gateTop+40, 12, 340);
-    ctx.fillRect(gx + gateW/2 - 12, gateTop+40, 12, 340);
+    ctx.fillRect(gx - gateW/2, gateTop+40, 14, colHeight);
+    ctx.fillRect(gx + gateW/2 - 14, gateTop+40, 14, colHeight);
 
     // crossbeam
     ctx.fillStyle = '#C9432F';
@@ -1175,9 +1433,9 @@
 
     // gold plaque on the crossbeam
     ctx.fillStyle = '#E8C24A';
-    ctx.fillRect(gx-30, gateTop+34, 60, 16);
+    ctx.fillRect(gx-35, gateTop+34, 70, 16);
     ctx.strokeStyle = '#B23A2E'; ctx.lineWidth=1.5;
-    ctx.strokeRect(gx-30, gateTop+34, 60, 16);
+    ctx.strokeRect(gx-35, gateTop+34, 70, 16);
     ctx.shadowBlur = 0;
 
     // ground-level stall awnings
@@ -1313,6 +1571,19 @@
 
   // Sham Shui Po: humble daytime market — bamboo poles with hanging laundry
   // jutting from tong-lau windows is the iconic, instantly-readable HK visual.
+  //
+  // 2026-07-21: after reference photos, added three more signatures that
+  // stood out across multiple photos but weren't in the scene yet: the
+  // buildings were a single flat tan color (real Sham Shui Po blocks are a
+  // patchwork of pastels — yellow, salmon, pale blue, mint), every window in
+  // the photos has an AC unit hanging off it, and one photo showed bamboo
+  // scaffolding wrapped in green netting on a building under renovation.
+  // Also added the level's first real landmark: a rounded-corner tong-lau
+  // with a continuous curved balcony, the single most distinctive shape
+  // across the reference photos (visible in two of them, at a street
+  // corner). Previously this scene, like Mong Kok and Yau Ma Tei, had no
+  // singular hero shape — this gives it one, the same upgrade Markham got
+  // from its Civic Centre.
   function sceneShamShuiPo(loc){
     // Portrait rebuild: spacing rescaled by PORTRAIT_SCALE; buildings
     // extended taller (160→460) to fill the much bigger sky area, with a
@@ -1320,13 +1591,40 @@
     // tong-lau blocks have poles jutting from multiple floors, and it gives
     // the taller frame more to look at instead of empty upper sky.
     const off = parallaxOffset(0.45, 84); // 140*0.6, matches building/stall spacing below
+    // pastel palette rotation — mint (#7FBFA8) deliberately excluded here so
+    // it stays exclusive to the corner landmark below and pops against its
+    // neighbors, the way it does in the reference photos.
+    const bldgColors = ['#E8D171', '#E8A38C', '#A8C4D4', '#DCCFAE'];
     for(let i=-1;i<10;i++){
       const bx = i*84 - off;
-      ctx.fillStyle = '#DCCFAE';
+      const ci = ((i%bldgColors.length)+bldgColors.length)%bldgColors.length;
+      ctx.fillStyle = bldgColors[ci];
       ctx.fillRect(bx, groundY-460, 66, 460);
       ctx.fillStyle = 'rgba(26,26,46,0.25)';
       for(let r=0;r<11;r++){
         ctx.fillRect(bx+6, groundY-445+r*34, 54, 20);
+      }
+      // AC units — small grey boxes on alternating window rows, one of the
+      // most recognizable textures in the reference photos (nearly every
+      // window has one). Kept sparse/deterministic (not every row) so it
+      // reads as texture rather than visual noise.
+      ctx.fillStyle = 'rgba(180,180,178,0.9)';
+      for(let r=0;r<11;r++){
+        if((r+i)%2===0) ctx.fillRect(bx+1, groundY-445+r*34+3, 9, 9);
+        if((r+i+1)%3===0) ctx.fillRect(bx+56, groundY-445+r*34+9, 9, 9);
+      }
+      // bamboo scaffolding + green netting on an occasional building under
+      // renovation — sparse (1 in 5) so it reads as a one-off detail
+      if(((i%5)+5)%5===0){
+        ctx.fillStyle = 'rgba(94,154,94,0.32)';
+        ctx.fillRect(bx-4, groundY-460, 74, 210);
+        ctx.strokeStyle = 'rgba(140,90,52,0.65)'; ctx.lineWidth = 2;
+        for(let s=0;s<5;s++){
+          ctx.beginPath(); ctx.moveTo(bx-4+s*18, groundY-460); ctx.lineTo(bx-4+s*18, groundY-250); ctx.stroke();
+        }
+        for(let s=0;s<4;s++){
+          ctx.beginPath(); ctx.moveTo(bx-4, groundY-460+s*52); ctx.lineTo(bx+70, groundY-460+s*52); ctx.stroke();
+        }
       }
       const clothes = ['#B25A2E','#3E7A5E','#FFFFFF','#8C5A34'];
       // lower bamboo pole with laundry
@@ -1346,6 +1644,54 @@
         ctx.fillRect(cx, groundY-338, 12, 16);
       }
     }
+
+    // Rounded-corner tong-lau landmark — singular (one instance, not a
+    // repeating tile), so like the other levels' hero shapes it drifts
+    // continuously off frame*mult with no wrap, rather than a modulo'd
+    // parallaxOffset. A true wraparound corner can't be shown from this
+    // flat, straight-on side view, so the rounding is applied to the top
+    // corners (matching the curved roofline in the reference photos) with
+    // continuous horizontal balcony-rail lines run straight through the
+    // curve, together reading as "the building curves around a corner"
+    // without needing real perspective. Bottom corners stay square and flush
+    // with the street — an early version rounded all four corners via the
+    // shared roundRect() helper and it looked like the building was a
+    // floating capsule rather than standing on the ground, caught in a
+    // rendered preview before this was seen in the actual game.
+    const cbX = 150 - frame*0.15, cbW = 100, cbH = 400, cbTop = groundY - cbH;
+    const cbR = 26;
+    ctx.fillStyle = '#7FBFA8';
+    ctx.beginPath();
+    ctx.moveTo(cbX, groundY);
+    ctx.lineTo(cbX, cbTop+cbR);
+    ctx.arcTo(cbX, cbTop, cbX+cbR, cbTop, cbR);
+    ctx.lineTo(cbX+cbW-cbR, cbTop);
+    ctx.arcTo(cbX+cbW, cbTop, cbX+cbW, cbTop+cbR, cbR);
+    ctx.lineTo(cbX+cbW, groundY);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.55)'; ctx.lineWidth = 2;
+    for(let f=1;f<10;f++){
+      const fy = cbTop + f*(cbH/10);
+      ctx.beginPath(); ctx.moveTo(cbX+4, fy); ctx.lineTo(cbX+cbW-4, fy); ctx.stroke();
+    }
+    ctx.fillStyle = 'rgba(26,26,46,0.22)';
+    for(let f=0;f<10;f++){
+      const fy = cbTop + f*(cbH/10) + 6;
+      ctx.fillRect(cbX+14, fy, cbW-28, 16);
+    }
+    // AC units on the landmark too, for consistency with the block around it
+    ctx.fillStyle = 'rgba(180,180,178,0.9)';
+    for(let f=0;f<10;f++){
+      if(f%2===0) ctx.fillRect(cbX+cbW-12, cbTop+f*(cbH/10)+10, 9, 9);
+    }
+    // small rooftop utility structure, matching the reference photo's
+    // rooftop box on the real corner building
+    ctx.fillStyle = '#EAE4D6';
+    ctx.fillRect(cbX+cbW/2-16, cbTop-24, 32, 24);
+    ctx.fillStyle = 'rgba(26,26,46,0.3)';
+    ctx.fillRect(cbX+cbW/2-10, cbTop-18, 20, 12);
+
     // ground-level stalls
     for(let i=-1;i<10;i++){
       const bx = i*84 - off + 9;
@@ -1390,29 +1736,84 @@
 
   // Cheung Chau: sunset pier — wooden posts, boat silhouettes on the water,
   // and a small lighthouse marking the harbour end.
+  // 2026-07-21: after Sham Shui Po's reference-photo pass, did the same for
+  // Cheung Chau. Photos showed two things the scene was missing entirely: a
+  // low-rise waterfront village with distinctive colorful tarp/awning
+  // rooftops (the scene had no buildings at all before this), and a green,
+  // tree-covered granite headland framing the bay. A colorful fishing-boat
+  // harbor was tried too, but removed the same day per feedback: even moved
+  // down to the waterline, the small boats read as "floating" rather than
+  // sitting in water, and the broader note was to keep the ground-level band
+  // (where the player and obstacles actually run) calm instead of adding
+  // more competing detail right where gameplay needs to read clearly. The
+  // island's famous "dumbbell" isthmus shape is a map-view characteristic,
+  // not something visible from this ground-level side view, so it isn't
+  // attempted here — same reasoning as leaving Temple Street's gate as a
+  // flat silhouette instead of a true wraparound. The lighthouse (already
+  // redesigned for proportion) and pier posts stay as they were.
   function sceneCheungChau(loc){
     // Boats and pier posts are separate tiled layers at different spacing —
     // previously both reused one shared offset scaled by different factors,
     // which matched neither layer's actual spacing and glitched on wrap.
     // Portrait rebuild: spacing rescaled by PORTRAIT_SCALE; the sun and
     // lighthouse (both fixed screen-position props, not scrolling elements)
-    // were hardcoded at x=620/x=700, off-screen at the new 480px width —
-    // repositioned on-screen, and the lighthouse extended taller (110→220)
-    // to fill the much bigger portrait sky area.
-    const boatOff = parallaxOffset(0.24, 108);  // 180*0.6, matches boat spacing below
+    // were hardcoded at x=620/x=700, off-screen at the new 480px width, so
+    // both were repositioned on-screen. The lighthouse itself was later
+    // redesigned for proportion; see the comment at its definition below.
     const postOff = parallaxOffset(0.4, 48);    // 80*0.6, matches post spacing below
+    const villageOff = parallaxOffset(0.35, 72); // matches village spacing below
+
     // sun
     ctx.fillStyle = 'rgba(255,255,255,0.5)';
     ctx.beginPath(); ctx.arc(340, groundY-320, 34, 0, Math.PI*2); ctx.fill();
-    // distant boats
-    for(let i=-1;i<7;i++){
-      const bx = i*108 - boatOff + 40;
-      ctx.fillStyle = 'rgba(26,26,46,0.55)';
+
+    // distant green granite headland framing the bay — Cheung Chau's
+    // coastline is rocky, tree-covered granite; a fixed screen-position
+    // background shape, not a scrolling tile, since it's one continuous
+    // landform rather than a repeating pattern.
+    ctx.fillStyle = '#5E8C5A';
+    ctx.beginPath();
+    ctx.moveTo(0, groundY-40);
+    ctx.quadraticCurveTo(60, groundY-260, 150, groundY-210);
+    ctx.quadraticCurveTo(210, groundY-180, 230, groundY-60);
+    ctx.lineTo(0, groundY-60);
+    ctx.closePath();
+    ctx.fill();
+    // rock patches — kept above the village roofline (groundY-120) so the
+    // buildings drawn below don't cover them; an earlier version placed
+    // these near the headland's base and the village painted right over them
+    ctx.fillStyle = 'rgba(168,150,122,0.55)';
+    ctx.beginPath(); ctx.ellipse(46, groundY-150, 28, 13, -0.2, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(120, groundY-180, 22, 11, 0.15, 0, Math.PI*2); ctx.fill();
+
+    // low-rise waterfront village — colorful tarp/awning rooftops are the
+    // single most recognizable texture in the aerial reference photos
+    const roofColors = ['#3FA9C4','#5FBFC9','#EAE4D6','#2E8CA0'];
+    for(let i=-1;i<9;i++){
+      const bx = i*72 - villageOff;
+      ctx.fillStyle = '#EDE6D6';
+      ctx.fillRect(bx, groundY-120, 60, 120);
+      ctx.fillStyle = 'rgba(26,26,46,0.15)';
+      for(let r=0;r<3;r++){ ctx.fillRect(bx+8, groundY-108+r*30, 44, 16); }
+      const rc = roofColors[((i%roofColors.length)+roofColors.length)%roofColors.length];
+      ctx.fillStyle = rc;
       ctx.beginPath();
-      ctx.moveTo(bx, groundY-72); ctx.lineTo(bx+34,groundY-72); ctx.lineTo(bx+26,groundY-60); ctx.lineTo(bx+6,groundY-60);
-      ctx.closePath(); ctx.fill();
-      ctx.fillRect(bx+16, groundY-95, 2, 24);
+      ctx.moveTo(bx-4, groundY-120);
+      ctx.lineTo(bx+64, groundY-120);
+      ctx.lineTo(bx+58, groundY-136);
+      ctx.lineTo(bx+2, groundY-132);
+      ctx.closePath();
+      ctx.fill();
     }
+
+    // 2026-07-21: the fishing-boat harbor that was here was removed per user
+    // feedback — even after moving them down to the waterline, the small
+    // boats still read as "floating" rather than sitting in water, and the
+    // broader note was to keep the ground-level band (where the player and
+    // obstacles actually run) calm rather than crowd it with more detail.
+    // The village + headland above carry the "this is Cheung Chau" identity
+    // instead; the plain ground color reads as open water on its own.
+
     // pier posts in foreground
     for(let i=-1;i<12;i++){
       const px = i*48 - postOff + 12;
@@ -1420,10 +1821,49 @@
       ctx.fillRect(px, groundY-40, 8, 40);
     }
     // lighthouse
+    // 2026-07-21 proportion redesign: the original portrait fix kept this at
+    // a flat 22px width but stretched it from 110 to 220 tall, turning a
+    // lighthouse into an unreadable beige pole (same root issue as the
+    // Markham clock tower and Temple Street gate). Rebuilt as a tapered
+    // shaft with a red band, a dark lantern room, and a pointed cap, plus a
+    // small rock mound at the base so it reads as standing on the pier
+    // rather than floating.
+    const lhBaseW = 32, lhTopW = 18, lhHeight = 170;
+    const lhX = 410, lhBottom = groundY - 30, lhTop = lhBottom - lhHeight;
+    // base rock mound
+    ctx.fillStyle = '#8C8C7A';
+    ctx.beginPath();
+    ctx.ellipse(lhX+lhBaseW/2, lhBottom+6, lhBaseW*0.9, 10, 0, 0, Math.PI*2);
+    ctx.fill();
+    // tapered shaft (wider at base, narrower at top — reads as a real lighthouse
+    // silhouette instead of a straight pole regardless of overall height)
     ctx.fillStyle = '#F3EFE6';
-    ctx.fillRect(410, groundY-260, 22, 220);
+    ctx.beginPath();
+    ctx.moveTo(lhX, lhBottom);
+    ctx.lineTo(lhX+lhBaseW, lhBottom);
+    ctx.lineTo(lhX+lhBaseW/2+lhTopW/2, lhTop+30);
+    ctx.lineTo(lhX+lhBaseW/2-lhTopW/2, lhTop+30);
+    ctx.closePath();
+    ctx.fill();
+    // red band, classic lighthouse marking
     ctx.fillStyle = '#B25A2E';
-    ctx.fillRect(406, groundY-270, 30, 14);
+    ctx.beginPath();
+    ctx.moveTo(lhX+5, lhBottom-50);
+    ctx.lineTo(lhX+lhBaseW-5, lhBottom-50);
+    ctx.lineTo(lhX+lhBaseW/2+lhTopW/2+2, lhBottom-70);
+    ctx.lineTo(lhX+lhBaseW/2-lhTopW/2-2, lhBottom-70);
+    ctx.closePath();
+    ctx.fill();
+    // lantern room + roof cap
+    ctx.fillStyle = '#2A2438';
+    ctx.fillRect(lhX+lhBaseW/2-lhTopW/2-3, lhTop+8, lhTopW+6, 22);
+    ctx.fillStyle = '#B25A2E';
+    ctx.beginPath();
+    ctx.moveTo(lhX+lhBaseW/2-lhTopW/2-6, lhTop+8);
+    ctx.lineTo(lhX+lhBaseW/2+lhTopW/2+6, lhTop+8);
+    ctx.lineTo(lhX+lhBaseW/2, lhTop-10);
+    ctx.closePath();
+    ctx.fill();
   }
 
   function drawPlayer(){
@@ -1583,12 +2023,39 @@
   }
 
   function drawCollectible(c){
+    // Prize glow is drawn first, underneath the real bottle art, so it shows
+    // whether the sprite path (real product photos, the common case) or the
+    // procedural drawBottle fallback is used below.
+    if(c.prize) drawPrizeGlow(c.x, c.y, c.w, c.h);
     if(SPRITES[c.type]){
       ctx.drawImage(SPRITES[c.type], c.x, c.y, c.w, c.h);
       return;
     }
     if(c.type === 'boost'){ drawBoostIcon(c.x, c.y, c.w, c.h); return; }
     drawBottle(c.x, c.y, c.w, c.h, c.type);
+  }
+
+  // Visual cue that a bottle is placed above normal jump reach and worth a
+  // score multiplier if you can get to it — a soft pulsing tea-brown halo
+  // plus a few fixed sparkle marks. Kept cheap (no shadowBlur, no per-frame
+  // gradient rebuild) per the Mong Kok perf lesson: a plain low-alpha circle
+  // and small filled diamonds are enough to read as "special" without a
+  // per-frame cost hit.
+  function drawPrizeGlow(x, y, w, h){
+    const cx = x+w/2, cy = y+h/2;
+    const pulse = 0.22 + Math.sin(frame*0.08)*0.06;
+    ctx.save();
+    ctx.fillStyle = 'rgba(140,90,52,'+pulse.toFixed(2)+')';
+    ctx.beginPath(); ctx.ellipse(cx, cy, w*0.72, h*0.62, 0, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#8C5A34';
+    for(let s=0;s<4;s++){
+      const ang = s*(Math.PI/2) + frame*0.02;
+      const sx = cx + Math.cos(ang)*w*0.78, sy = cy + Math.sin(ang)*h*0.68;
+      ctx.beginPath();
+      ctx.moveTo(sx, sy-5); ctx.lineTo(sx+5, sy); ctx.lineTo(sx, sy+5); ctx.lineTo(sx-5, sy);
+      ctx.closePath(); ctx.fill();
+    }
+    ctx.restore();
   }
 
   // Double-jump power-up icon — deliberately NOT a third product bottle (only
