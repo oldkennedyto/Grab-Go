@@ -135,6 +135,19 @@
     width: fit-content;
   }
   .boostBadge.show{ display:block; }
+  .shieldBadge{
+    /* Two states in one element: a quieter "banking progress" look (translucent
+       navy) while collecting toward the next charge, switching to the solid
+       navy "ready" look (matching .boostBadge) once it's actually usable —
+       see updateHud(). */
+    margin-top: 4px; display:none;
+    background: rgba(26,26,46,0.55); color: var(--white);
+    border-radius: 8px; padding: 3px 9px;
+    font-size: 11px; font-weight:700; letter-spacing:0.3px;
+    width: fit-content;
+  }
+  .shieldBadge.show{ display:block; }
+  .shieldBadge.ready{ background:#1A1A2E; }
   .streakBadge{
     /* Persistent readout of the collect-streak multiplier, so the risk/reward
        (don't let a bottle scroll off-screen) is visible the whole time it's
@@ -273,6 +286,7 @@
       <div>
         <div class="score" id="scoreLabel">0</div>
         <div class="boostBadge" id="boostBadge">⚡ Double Jump Ready; reach high!</div>
+        <div class="shieldBadge" id="shieldBadge"></div>
         <div class="streakBadge" id="streakBadge"></div>
       </div>
       <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;pointer-events:auto;">
@@ -587,7 +601,13 @@
     // hasBoost is an earned charge that persists across multiple jumps until
     // actually spent; midAirBoostUsed just blocks spending it twice in the
     // same airtime and is cleared on landing so a fresh jump can use it again.
-    hasBoost:false, midAirBoostUsed:false
+    hasBoost:false, midAirBoostUsed:false,
+    // Shield: see SHIELD_THRESHOLD below. hasShield is an earned charge that
+    // converts the next obstacle hit into a save instead of game over.
+    // invincibleFrames counts down (in dt units) after a save, giving the
+    // player a brief window to actually clear the obstacle that just hit them
+    // rather than re-triggering the same collision one frame later.
+    hasShield:false, invincibleFrames:0
   };
   const GRAVITY = 0.62, JUMP_V = -13.4;
   const JUMP_CUT = 0.45;       // releasing early while still rising cuts the jump short (variable height)
@@ -611,6 +631,16 @@
   // without dying, so they're the natural fit for a risk/reward streak.
   let collectStreak = 0;
 
+  // Shield / extra-life mechanic: a running count of collected product
+  // bottles (cup/lemon, including prize variants — not the 'boost' pickup,
+  // same exclusion rule as collectStreak) earns one banked shield charge at
+  // SHIELD_THRESHOLD, capped at holding 1 at a time — progress only
+  // accumulates while a charge isn't already held, mirroring the "only spawn
+  // a boost if not already holding one" rule elsewhere, so it can't stockpile.
+  // 20 is a first-pass number, not yet tuned against real play.
+  const SHIELD_THRESHOLD = 20;
+  let shieldProgress = 0;
+
   // Level-to-level background crossfade (see drawBackground/drawSceneLayer).
   // prevLevelIndex holds the location being faded OUT of; null means no
   // transition is in progress. transitionT counts up in dt units against
@@ -626,10 +656,11 @@
     player.y = groundY - player.h; player.vy = 0; player.jumping = false;
     player.jumpPunch = 0; player.landPunch = 0;
     player.hasBoost = false; player.midAirBoostUsed = false;
+    player.hasShield = false; player.invincibleFrames = 0;
     jumpBufferTimer = 0; holdingJump = false; shakeFrames = 0;
     prevLevelIndex = null; transitionT = 0;
     spawnTimer = 0; nextSpawnAt = 60; frame = 0;
-    collectStreak = 0;
+    collectStreak = 0; shieldProgress = 0;
     updateHud();
     showLocationBanner(true);
   }
@@ -645,6 +676,21 @@
       streakEl.classList.add('show');
     } else {
       streakEl.classList.remove('show');
+    }
+    // Shield badge: a quieter "in progress" style while banking toward the
+    // next charge, switching to the same solid-navy "ready" treatment the
+    // boost badge uses once it's actually usable, so the two earned-charge
+    // mechanics read as visually related.
+    const shieldEl = document.getElementById('shieldBadge');
+    if(player.hasShield){
+      shieldEl.textContent = '🛡 Shield Ready!';
+      shieldEl.classList.add('show', 'ready');
+    } else if(shieldProgress > 0){
+      shieldEl.textContent = '🛡 ' + shieldProgress + '/' + SHIELD_THRESHOLD;
+      shieldEl.classList.add('show');
+      shieldEl.classList.remove('ready');
+    } else {
+      shieldEl.classList.remove('show', 'ready');
     }
   }
 
@@ -900,14 +946,34 @@
       if(Math.random() < 0.55) spawnCollectible();
     }
 
+    // Invincibility ticks down once per frame, not once per obstacle —
+    // decremented here, before the obstacle loop, so a save that started this
+    // very frame doesn't also get decremented by its own triggering iteration.
+    if(player.invincibleFrames > 0) player.invincibleFrames -= dt;
+
     // move + collide obstacles
     for(let i=obstacles.length-1;i>=0;i--){
       const o = obstacles[i];
       o.x -= speed * dt;
       if(o.x + o.w < 0){ obstacles.splice(i,1); continue; }
-      if(rectHit(player, o)){
-        endGame();
-        return;
+      if(player.invincibleFrames > 0){
+        // Already riding out a shield save — pass through harmlessly instead
+        // of re-triggering (the obstacle is often still overlapping the
+        // player for a few frames after the save, since neither moved away).
+      } else if(rectHit(player, o)){
+        if(player.hasShield){
+          player.hasShield = false;
+          player.invincibleFrames = 50; // ~0.83s grace at the 60fps reference rate
+          shakeFrames = 10; shakeMag = 4; // smaller than a real death's shake — a "whew," not an "ouch"
+          popups.push({x:player.x+player.w/2, y:player.y-14, text:'Shield Saved You!', life:44, color:'#1A1A2E'});
+          playTone(220, 0.2, 'sawtooth'); // distinct low tone, unlike any existing collect/boost/crash sound
+          for(let p=0;p<10;p++){
+            particles.push({x:player.x+player.w/2, y:player.y+player.h/2, vx:(Math.random()-0.5)*5, vy:-Math.random()*3-1, life:26, color:'#1A1A2E'});
+          }
+        } else {
+          endGame();
+          return;
+        }
       }
       // Near-miss bonus — cleared while still airborne — checked once, right as it passes.
       if(!o.bonusChecked && o.x + o.w < player.x){
@@ -953,6 +1019,18 @@
           continue;
         }
         collectStreak++;
+        // Shield progress — same exclusion as the streak (boost pickups don't
+        // count), and only accrues while a charge isn't already banked so it
+        // can't stockpile past 1, mirroring the boost's own spawn rule.
+        if(!player.hasShield){
+          shieldProgress++;
+          if(shieldProgress >= SHIELD_THRESHOLD){
+            shieldProgress = 0;
+            player.hasShield = true;
+            popups.push({x:c.x+c.w/2, y:c.y-24, text:'🛡 Shield Ready!', life:46, color:'#1A1A2E'});
+            playTone(660, 0.15, 'square'); // distinct from every other collect/boost tone
+          }
+        }
         // Streak multiplier — up to 2.5x around a 15-streak. Collectibles are
         // the one thing in this game you can miss without dying, so they're
         // the natural risk/reward lever (see collectStreak comment above).
@@ -1867,6 +1945,13 @@
   }
 
   function drawPlayer(){
+    // Invincibility flicker after a shield save: skip the draw entirely every
+    // few frames rather than touching globalAlpha — this function's face/
+    // cheek drawing already hard-sets globalAlpha back to 1 partway through
+    // (not via save/restore), so a wrapping alpha would get clobbered.
+    // Skip-frame flicker is simpler, safe, and reads as the classic
+    // invincibility visual (Mario, etc.).
+    if(player.invincibleFrames > 0 && Math.floor(frame/4)%2===0) return;
     const x = player.x, y = player.y, w = player.w, h = player.h;
 
     if(SPRITES.player){
